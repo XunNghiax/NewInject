@@ -27,4 +27,5 @@ dist/
 .mypy_cache/
 
 # Chrome data (nếu chỉ chứa dữ liệu tạm)
-chrome_data/
+chrome_data_1/
+cookies.txt

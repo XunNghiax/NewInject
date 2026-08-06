@@ -18,14 +18,17 @@ from PyQt6.QtGui import QFont, QPalette, QColor
 # 🔗 ĐỒNG BỘ THỰC TẾ: Import class xử lý từ file src/
 
 from src.backend import CapCutBackend
-from src.merge_srt import merge_numbered_srt_files
-from src.split_srt import split_srt_file
-from src.renumber import process_and_renumber_srt
-from src.countWPM import analyze_audio_wpm_and_log
+from src.srt_utils import (
+    merge_numbered_srt_files,
+    split_srt_file,
+    process_and_renumber_srt,
+    analyze_audio_wpm_and_log,
+    compare_srt_folders,
+    process_srt_speed,
+    check_srt_audio_sync
+)
 from src.batch_replace_srt import replace_blocks_in_folder, replace_blocks_in_file
-from src.compare_srt import compare_srt_folders
 from src.qa_srt_before import analyze_srt_to_file
-from src.convert_speed import process_srt_speed
 from src.gemini_translate import run_auto_translate_srt
 from src.auto_qa_repair import run_auto_qa_repair
 
