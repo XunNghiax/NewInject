@@ -22,7 +22,7 @@ def sanitize_filename(filename: str) -> str:
     return clean if clean else "Bilibili_Video_Vi"
 
 
-def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = print):
+def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None):
     """Nạp file Prompt mẫu hướng dẫn quy tắc dịch thuật vào Gemini AI."""
     initial_count = page.locator('.model-response-text').count()
     if os.path.exists(prompt_file_path):
@@ -69,19 +69,21 @@ def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = pr
         except Exception as e:
             log_callback(f"⚠️ Cảnh báo nạp Prompt: {e}")
 
-        smart_wait_for_gemini(page, initial_count, 30, log_callback)
+        smart_wait_for_gemini(page, initial_count, 60, log_callback, check_pause_callback=check_pause_callback)
     else:
         log_callback("⚠️ Không tìm thấy file prompt, sử dụng luật dịch mặc định.")
 
 
-def smart_wait_for_gemini(page, initial_count: int, max_wait_time: int, log_callback: Callable = print) -> bool:
-    """Theo dõi Gemini gõ chữ real-time đến khi hoàn tất."""
+def smart_wait_for_gemini(page, initial_count: int, max_wait_time: int, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None) -> bool:
+    """Theo dõi Gemini gõ chữ real-time đến khi hoàn tất, có hỗ trợ tạm dừng."""
     log_callback(f"👀 Đang giám sát Gemini AI dịch phụ đề (Tối đa {max_wait_time}s)...")
     previous_text = ""
     stable_count = 0
     start_time = time.time()
     
     while time.time() - start_time < max_wait_time:
+        if check_pause_callback:
+            check_pause_callback()
         time.sleep(2)
         current_count = page.locator('.model-response-text').count()
         if current_count > initial_count:
@@ -258,6 +260,7 @@ def run_auto_translate_srt(
     delay_time: int = 15,
     log_callback: Callable = print,
     profile_folder: str = "chrome_data_1",
+    check_pause_callback: Optional[Callable] = None,
     **kwargs
 ):
     """
@@ -339,12 +342,11 @@ def run_auto_translate_srt(
                         break
 
                 short_prompt = (
-                    "Hãy dịch nội dung file SRT đính kèm sang Tiếng Việt chuẩn văn phong phim.\n"
-                    "ĐỒNG THỜI DỊCH TIÊU ĐỀ VIDEO SANG TIẾNG VIỆT:\n"
-                    "Dòng ĐẦU TIÊN của câu trả lời BẮT BUỘC ghi theo định dạng: [TITLE: Tên_Video_Tiếng_Việt]\n"
-                    "NHẮC LẠI LUẬT QUAN TRỌNG:\n"
-                    "- Giữ nguyên hoàn toàn cấu trúc ID và Timecode.\n"
-                    "- Chỉ trả về duy nhất dòng [TITLE: ...] ở dòng đầu tiên, tiếp theo là toàn bộ nội dung file SRT đã dịch."
+                    "Hãy dịch toàn bộ nội dung file SRT đính kèm sang Tiếng Việt chuẩn văn phong phim.\n"
+                    "NHẮC LẠI LUẬT BẮT BUỘC:\n"
+                    "- Giữ nguyên 100% cấu trúc ID và mốc thời gian (Timeline).\n"
+                    "- CHỈ trả về duy nhất nội dung file SRT đã dịch và BẮT BUỘC đặt trong khối code block markdown (```srt\n...\n```).\n"
+                    "- Không thêm bất kỳ câu chào hay lời giải thích nào ngoài khối code block."
                 )
 
                 initial_count = upload_srt_and_send(page, cn_file_path, short_prompt, log_callback)
@@ -356,26 +358,16 @@ def run_auto_translate_srt(
                     send_initial_prompt(page, prompt_file, log_callback)
                     continue
 
-                success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback)
+                success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback, check_pause_callback=check_pause_callback)
                 responses = page.locator('.model-response-text').all_inner_texts()
                 
                 if responses:
                     latest_response = responses[-1]
-                    clean_text = clean_gemini_output(latest_response)
-                    clean_text = re.sub(r'\[cite:\s*\d+\]', '', clean_text)
+                    clean_srt = clean_gemini_output(latest_response)
+                    clean_srt = re.sub(r'\[cite:\s*\d+\]', '', clean_srt)
 
-                    # Trích xuất Tiêu đề Tiếng Việt được AI dịch
-                    translated_title = raw_title
-                    title_match = re.search(r'\[TITLE:\s*([^\]]+)\]', clean_text, re.IGNORECASE)
-                    if title_match:
-                        translated_title = sanitize_filename(title_match.group(1).strip())
-                        # Xóa dòng [TITLE: ...] khỏi nội dung SRT
-                        clean_srt = re.sub(r'\[TITLE:\s*[^\]]+\]\s*', '', clean_text).strip()
-                    else:
-                        clean_srt = clean_text.strip()
-
-                    # Đặt tên file xuất: Tên Tiếng Việt + .srt
-                    out_filename = f"{translated_title}.srt"
+                    # Đặt tên file xuất SRT Tiếng Việt: [Tên_Gốc]_vi.srt hoặc [Tên_Gốc].srt
+                    out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
                     vi_file_path = os.path.join(vi_folder, out_filename)
 
                     # Lưu file SRT dịch
@@ -385,22 +377,9 @@ def run_auto_translate_srt(
                     # Kiểm tra cấu trúc mốc thời gian với file gốc
                     log_callback(f"⚖️ Đang kiểm tra cấu trúc mốc thời gian cho: {out_filename}...")
                     if is_srt_structure_match(cn_file_path, vi_file_path, log_callback):
-                        log_callback(f"✅ ĐẠT YÊU CẦU! Đã dịch xong Tiêu đề & Nội dung SRT thành công.")
+                        log_callback(f"✅ ĐẠT YÊU CẦU! Đã dịch xong phụ đề SRT sang Tiếng Việt.")
                         log_callback(f"📁 Tệp phụ đề Tiếng Việt đã lưu tại: {vi_file_path}", "success")
                         
-                        # Đồng bộ đổi tên file Video (.mp4) tương ứng nếu có
-                        old_video_path = os.path.join(cn_folder, f"{raw_title}.mp4")
-                        if not os.path.exists(old_video_path):
-                            old_video_path = os.path.join(vi_folder, f"{raw_title}.mp4")
-
-                        if os.path.exists(old_video_path) and raw_title != translated_title:
-                            new_video_path = os.path.join(vi_folder, f"{translated_title}.mp4")
-                            try:
-                                shutil.move(old_video_path, new_video_path)
-                                log_callback(f"🎬 Đã đổi tên Video tương ứng sang Tiếng Việt: {os.path.basename(new_video_path)}", "success")
-                            except Exception:
-                                pass
-
                         files_translated_in_session += 1
                         is_file_success = True
                     else:
@@ -420,6 +399,6 @@ def run_auto_translate_srt(
                 log_callback(f"⚠️ Bỏ qua file {file_name} sau {MAX_RETRIES} lần thử thất bại.")
 
             log_callback(f"Nghỉ {delay_time}s trước khi chạy file tiếp theo...")
-            countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:")
+            countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:", check_pause_callback=check_pause_callback)
 
         log_callback("\n🎉 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ & TIÊU ĐỀ SANG TIẾNG VIỆT!")

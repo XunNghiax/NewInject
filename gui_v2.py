@@ -90,6 +90,16 @@ class ProcessWorker(QThread):
     def emit_progress(self, pct: int, status: str):
         self.progress_signal.emit(pct, status)
 
+    def check_pause(self):
+        """Kiểm tra và tạm dừng thread ngay lập tức nếu có lệnh pause"""
+        self.mutex.lock()
+        while self._is_paused:
+            self.pause_condition.wait(self.mutex)
+        if self._is_stopped:
+            self.mutex.unlock()
+            raise Exception("Tiến trình đã bị người dùng hủy bỏ!")
+        self.mutex.unlock()
+
     def run(self):
         try:
             # ── CHẾ ĐỘ 1: DỊCH FILE PHỤ ĐỀ SRT CHỌN TỪ BÊN NGOÀI ──
@@ -99,9 +109,7 @@ class ProcessWorker(QThread):
                     self.finished_signal.emit(False, "Modul dịch thuật 'gemini_translate' chưa sẵn sàng!")
                     return
 
-                # Chuẩn bị thư mục chứa file nguồn và file đích
                 src_dir = os.path.dirname(os.path.abspath(self.srt_translate_path))
-                file_name = os.path.basename(self.srt_translate_path)
                 out_dir = self.output_dir
 
                 prompt_file = "./prompts/promptTranslates.md"
@@ -114,7 +122,8 @@ class ProcessWorker(QThread):
                     cn_folder=src_dir,
                     vi_folder=out_dir,
                     wait_time=300,
-                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl)
+                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                    check_pause_callback=self.check_pause
                 )
                 self.progress_signal.emit(100, "Hoàn tất dịch 100%! 🎉")
                 self.finished_signal.emit(True, f"🎉 Đã dịch xong phụ đề SRT sang Tiếng Việt!")
@@ -135,7 +144,6 @@ class ProcessWorker(QThread):
                 res = self.srt_generator.generate_srt(self.local_media_path, model_size="base")
                 if res.get("success"):
                     srt_file = res.get("srt_path")
-                    # Nếu có bật tự động dịch sau khi tạo phụ đề
                     if self.auto_translate_srt and srt_file and os.path.exists(srt_file) and run_auto_translate_srt:
                         self.log_signal.emit("🌐 Khởi chạy Gemini AI dịch phụ đề vừa tạo sang Tiếng Việt...", "info")
                         prompt_file = "./prompts/promptTranslates.md"
@@ -147,7 +155,8 @@ class ProcessWorker(QThread):
                             cn_folder=src_dir,
                             vi_folder=self.output_dir,
                             wait_time=300,
-                            log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl)
+                            log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                            check_pause_callback=self.check_pause
                         )
                         self.finished_signal.emit(True, f"🎉 Đã tạo & dịch xong phụ đề SRT sang Tiếng Việt cho file local!")
                     else:
@@ -170,7 +179,6 @@ class ProcessWorker(QThread):
 
                 if res.get("success"):
                     video_file = res.get("file_path")
-                    # 1. Tạo SRT nếu bật
                     if self.auto_gen_srt and video_file and os.path.exists(video_file) and SubtitleGenerator:
                         self.log_signal.emit("🎙️ Kích hoạt tính năng Tự Động Tạo Phụ Đề SRT bằng Faster-Whisper AI...", "info")
                         self.srt_generator = SubtitleGenerator(
@@ -181,7 +189,6 @@ class ProcessWorker(QThread):
                         srt_res = self.srt_generator.generate_srt(video_file, model_size="base")
                         srt_file = srt_res.get("srt_path") if srt_res.get("success") else None
 
-                        # 2. Dịch SRT sang Tiếng Việt nếu bật
                         if self.auto_translate_srt and srt_file and os.path.exists(srt_file) and run_auto_translate_srt:
                             self.log_signal.emit("🌐 Kích hoạt Gemini AI dịch phụ đề vừa tạo sang Tiếng Việt...", "info")
                             prompt_file = "./prompts/promptTranslates.md"
@@ -193,7 +200,8 @@ class ProcessWorker(QThread):
                                 cn_folder=src_dir,
                                 vi_folder=self.output_dir,
                                 wait_time=300,
-                                log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl)
+                                log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                                check_pause_callback=self.check_pause
                             )
                             self.finished_signal.emit(True, f"🎉 Đã Tải Video ➔ Tạo Phụ Đề ➔ Dịch Tiếng Việt thành công cho: {res.get('title', '')}")
                         else:
