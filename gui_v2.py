@@ -112,7 +112,9 @@ class ProcessWorker(QThread):
                 src_dir = os.path.dirname(os.path.abspath(self.srt_translate_path))
                 out_dir = self.output_dir
 
-                prompt_file = "./prompts/promptTranslates.md"
+                prompt_file = "./user_data/prompts/promptTranslates.md"
+                if not os.path.exists(prompt_file):
+                    prompt_file = "./prompts/promptTranslates.md"
                 if not os.path.exists(prompt_file):
                     prompt_file = "./prompts/translate.txt"
 
@@ -146,7 +148,9 @@ class ProcessWorker(QThread):
                     srt_file = res.get("srt_path")
                     if self.auto_translate_srt and srt_file and os.path.exists(srt_file) and run_auto_translate_srt:
                         self.log_signal.emit("🌐 Khởi chạy Gemini AI dịch phụ đề vừa tạo sang Tiếng Việt...", "info")
-                        prompt_file = "./prompts/promptTranslates.md"
+                        prompt_file = "./user_data/prompts/promptTranslates.md"
+                        if not os.path.exists(prompt_file):
+                            prompt_file = "./prompts/promptTranslates.md"
                         if not os.path.exists(prompt_file):
                             prompt_file = "./prompts/translate.txt"
                         src_dir = os.path.dirname(os.path.abspath(srt_file))
@@ -191,7 +195,9 @@ class ProcessWorker(QThread):
 
                         if self.auto_translate_srt and srt_file and os.path.exists(srt_file) and run_auto_translate_srt:
                             self.log_signal.emit("🌐 Kích hoạt Gemini AI dịch phụ đề vừa tạo sang Tiếng Việt...", "info")
-                            prompt_file = "./prompts/promptTranslates.md"
+                            prompt_file = "./user_data/prompts/promptTranslates.md"
+                            if not os.path.exists(prompt_file):
+                                prompt_file = "./prompts/promptTranslates.md"
                             if not os.path.exists(prompt_file):
                                 prompt_file = "./prompts/translate.txt"
                             src_dir = os.path.dirname(os.path.abspath(srt_file))
@@ -567,7 +573,20 @@ class MainWindowV2(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self.clear_console)
 
     def update_cookie_badge_status(self):
-        possible_files = ["./cookie.txt", "./cookies.txt", "./downloads/cookie.txt", "./downloads/cookies.txt"]
+        # Tự động tạo cấu trúc thư mục cá nhân người dùng
+        os.makedirs("./user_data/cookies", exist_ok=True)
+        os.makedirs("./user_data/chrome_profiles", exist_ok=True)
+        os.makedirs("./user_data/config", exist_ok=True)
+        os.makedirs("./user_data/prompts", exist_ok=True)
+
+        possible_files = [
+            "./user_data/cookies/cookies.txt",
+            "./user_data/cookies.txt",
+            "./cookie.txt", 
+            "./cookies.txt", 
+            "./downloads/cookie.txt", 
+            "./downloads/cookies.txt"
+        ]
         has_cookie = False
         for p in possible_files:
             if os.path.exists(p):
@@ -583,9 +602,11 @@ class MainWindowV2(QMainWindow):
                                 value = item.get("value", "")
                                 exp = int(item.get("expirationDate", 2147483647))
                                 netscape_content += f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\t{name}\t{value}\n"
-                            with open("./cookies.txt", "w", encoding="utf-8") as out:
+                            
+                            # Lưu vào thư mục cá nhân người dùng user_data/cookies/
+                            with open("./user_data/cookies/cookies.txt", "w", encoding="utf-8") as out:
                                 out.write(netscape_content)
-                            with open("./downloads/cookies.txt", "w", encoding="utf-8") as out:
+                            with open("./cookies.txt", "w", encoding="utf-8") as out:
                                 out.write(netscape_content)
                             has_cookie = True
                             break

@@ -163,7 +163,12 @@ class BilibiliDownloader:
         if FFMPEG_DIR and os.path.exists(FFMPEG_DIR):
             base_ydl_opts["ffmpeg_location"] = FFMPEG_DIR
 
-        custom_cookie_files = ["./cookies.txt", "./downloads/cookies.txt"]
+        custom_cookie_files = [
+            "./user_data/cookies/cookies.txt",
+            "./user_data/cookies.txt",
+            "./cookies.txt",
+            "./downloads/cookies.txt"
+        ]
         found_cookie_file = None
         for cf in custom_cookie_files:
             if os.path.exists(cf):

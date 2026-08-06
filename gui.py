@@ -34,7 +34,7 @@ from src.auto_qa_repair import run_auto_qa_repair
 
 warnings.filterwarnings("ignore", message="Couldn't find ffmpeg or avconv")
 
-CONFIG_FILE = "user_config.json"
+CONFIG_FILE = os.path.join("user_data", "config", "user_config.json")
 
 DEFAULT_CONFIG = {
     'SRT_FILE_PATH': "./source/srt/SonAnhChieuHonVi.srt",

@@ -4,7 +4,7 @@ import subprocess
 import platform
 import re
 import shutil
-from typing import Callable, Optional, Dict, Any, Tuple
+from typing import Callable, Optional, Dict, Any, Tuple, List
 from playwright.sync_api import sync_playwright
 from src.gemini_core import (
     clean_gemini_output,
@@ -32,6 +32,20 @@ def count_srt_blocks(file_path: str) -> int:
         return len(matches)
     except Exception:
         return 0
+
+
+def get_available_profiles() -> List[str]:
+    """Tự động phát hiện các thư mục Profile Chrome đã tạo (chrome_data_1, chrome_data_2, ...)."""
+    profiles = []
+    for i in range(1, 10):
+        p_dir = f"chrome_data_{i}"
+        if os.path.exists(p_dir):
+            profiles.append(p_dir)
+    if not profiles:
+        profiles = ["chrome_data_1", "chrome_data_2"]
+        os.makedirs("chrome_data_1", exist_ok=True)
+        os.makedirs("chrome_data_2", exist_ok=True)
+    return profiles
 
 
 def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None):
@@ -114,21 +128,22 @@ def smart_wait_for_gemini(page, initial_count: int, max_wait_time: int, log_call
     return True
 
 
-def check_model_status(page, log_callback: Callable = print) -> str:
-    """Kiểm tra mô hình Gemini xem có bị hạ cấp không."""
+def check_model_status(page, log_callback: Callable = print) -> Tuple[str, str]:
+    """Kiểm tra tên mô hình Gemini và báo trạng thái xem có bị hạ cấp Flash-Lite không."""
     try:
-        page.wait_for_selector('button', timeout=5000)
+        page.wait_for_selector('button', timeout=4000)
         buttons = page.locator('button').all()
         for btn in buttons:
             if btn.is_visible():
                 text = btn.inner_text().strip()
-                if "Flash-Lite" in text or "Flash Lite" in text:
-                    return "FLASH_LITE"
-                elif "Flash" in text or "Pro" in text:
-                    return "NORMAL"
+                if "Gemini" in text or "Flash" in text or "Pro" in text or "Advanced" in text:
+                    if "Flash-Lite" in text or "Flash Lite" in text:
+                        return "FLASH_LITE", text
+                    else:
+                        return "NORMAL", text
     except Exception:
         pass
-    return "NORMAL"
+    return "NORMAL", "Gemini Pro/Flash"
 
 
 def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback: Callable = print) -> Optional[int]:
@@ -261,84 +276,29 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
         return None
 
 
-def translate_single_srt_file(
-    page,
-    cn_file_path: str,
-    vi_file_path: str,
-    prompt_file: str,
-    wait_time: int = 300,
-    log_callback: Callable = print,
-    check_pause_callback: Optional[Callable] = None
-) -> bool:
-    """Hàm xử lý dịch 1 file SRT đơn lẻ qua Gemini AI."""
-    file_name = os.path.basename(cn_file_path)
-    MAX_RETRIES = 3
-    attempt = 0
-
-    short_prompt = (
-        "Hãy dịch toàn bộ nội dung file SRT đính kèm sang Tiếng Việt chuẩn văn phong phim.\n"
-        "NHẮC LẠI LUẬT BẮT BUỘC:\n"
-        "- Giữ nguyên 100% cấu trúc ID và mốc thời gian (Timeline).\n"
-        "- CHỈ trả về duy nhất nội dung file SRT đã dịch và BẮT BUỘC đặt trong khối code block markdown (```srt\n...\n```).\n"
-        "- Không thêm bất kỳ câu chào hay lời giải thích nào ngoài khối code block."
+def create_browser_context(p, profile_folder: str, prompt_file: str, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None):
+    """Tạo phiên làm việc trình duyệt mới với Profile chỉ định."""
+    log_callback(f"🌐 Đang mở trình duyệt với Profile: [{profile_folder}]...")
+    user_data_dir = f"./{profile_folder}"
+    os.makedirs(user_data_dir, exist_ok=True)
+    
+    browser = p.chromium.launch_persistent_context(
+        user_data_dir=user_data_dir,
+        headless=False,
+        channel="chrome",
+        args=["--start-maximized", "--disable-blink-features=AutomationControlled"]
     )
+    page = browser.new_page()
+    page.goto("https://gemini.google.com/app", timeout=60000)
+    page.wait_for_load_state("load")
 
-    while attempt < MAX_RETRIES:
-        attempt += 1
-        if attempt > 1:
-            log_callback(f"\n♻️ TIẾN HÀNH DỊCH LẠI {file_name} (Lần thử: {attempt}/{MAX_RETRIES})...")
-
-        while True:
-            model_status = check_model_status(page, log_callback)
-            if model_status == "FLASH_LITE":
-                log_callback("🛑 BỊ HẠ CẤP XUỐNG FLASH-LITE! Script tạm dừng 60 phút...")
-                countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:", check_pause_callback=check_pause_callback)
-                page.goto("https://gemini.google.com/app", timeout=60000)
-                page.wait_for_load_state("load")
-                time.sleep(5)
-                send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
-            else:
-                break
-
-        initial_count = upload_srt_and_send(page, cn_file_path, short_prompt, log_callback)
-        if initial_count is None:
-            log_callback("❌ Gửi prompt thất bại. Tải lại trang...")
-            page.goto("https://gemini.google.com/app", timeout=45000)
-            page.wait_for_load_state("load")
-            time.sleep(4)
-            send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
-            continue
-
-        success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback, check_pause_callback=check_pause_callback)
-        responses = page.locator('.model-response-text').all_inner_texts()
-        
-        if responses:
-            latest_response = responses[-1]
-            clean_srt = clean_gemini_output(latest_response)
-            clean_srt = re.sub(r'\[cite:\s*\d+\]', '', clean_srt)
-
-            os.makedirs(os.path.dirname(os.path.abspath(vi_file_path)), exist_ok=True)
-            with open(vi_file_path, "w", encoding="utf-8") as f:
-                f.write(clean_srt)
-            
-            log_callback(f"⚖️ Đang kiểm tra cấu trúc mốc thời gian cho: {os.path.basename(vi_file_path)}...")
-            if is_srt_structure_match(cn_file_path, vi_file_path, log_callback):
-                log_callback(f"✅ ĐẠT YÊU CẦU! Đã dịch xong tệp phụ đề SRT sang Tiếng Việt.", "success")
-                return True
-            else:
-                log_callback(f"🗑️ LỖI CẤU TRÚC: AI làm hỏng mốc thời gian. Đang thử dịch lại...")
-                if os.path.exists(vi_file_path):
-                    os.remove(vi_file_path)
-                
-                page.goto("https://gemini.google.com/app", timeout=45000)
-                page.wait_for_load_state("load")
-                time.sleep(4)
-                send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
-                time.sleep(3)
-        else:
-            log_callback("❌ Không nhận được phản hồi từ AI. Thử lại...")
-
-    return False
+    log_callback(f"⏳ Đang chờ giao diện Gemini nạp trên Profile [{profile_folder}]...")
+    time.sleep(3)
+    send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+    
+    status, model_name = check_model_status(page, log_callback)
+    log_callback(f"ℹ️ Trạng thái Mô Hình Profile [{profile_folder}]: {model_name}", "info")
+    return browser, page, status
 
 
 def run_auto_translate_srt(
@@ -354,13 +314,12 @@ def run_auto_translate_srt(
     **kwargs
 ):
     """
-    Tiến trình dịch phụ đề tự động:
-    - Nếu file SRT lớn (>100 block), tự động TÁCH THÀNH CÁC FILE NHỎ 100 block vào thư mục tạm.
-    - Gửi dịch lần lượt từng file nhỏ qua Gemini AI.
-    - Tự động GỘP THÀNH FILE SRT TIẾNG VIỆT HOÀN CHỈNH duy nhất và dọn dẹp thư mục tạm.
+    Tiến trình dịch phụ đề tự động tích hợp CƠ CHẾ XOAY VÒNG ĐA PROFILE CHROME (AUTO PROFILE ROTATION):
+    - Tự động kiểm tra phiên bản Gemini AI.
+    - Nếu hết hạn ngạch Pro (chuyển sang Flash-Lite) ➔ TỰ ĐỘNG ĐỔI SANG PROFILE TIẾP THEO (chrome_data_2, chrome_data_3...).
+    - Tiếp tục duy trì 100% Mô hình Pro/Flash tốc độ cao liên tục mà không cần chờ 60 phút!
     """
     force_kill_chrome(log_callback)
-    log_callback("🚀 Khởi động trình duyệt Playwright...")
     os.makedirs(vi_folder, exist_ok=True)
 
     srt_files = [f for f in os.listdir(cn_folder) if f.endswith('.srt')]
@@ -375,23 +334,12 @@ def run_auto_translate_srt(
         log_callback("⚠️ Không tìm thấy tệp .srt nào trong thư mục nguồn!")
         return
 
+    available_profiles = get_available_profiles()
+    current_profile_idx = 0
+    current_profile = available_profiles[current_profile_idx]
+
     with sync_playwright() as p:
-        user_data_dir = f"./{profile_folder}" if profile_folder else "./chrome_data_1"
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            headless=False,
-            channel="chrome",
-            args=["--start-maximized", "--disable-blink-features=AutomationControlled"]
-        )
-
-        page = browser.new_page()
-        page.goto("https://gemini.google.com/app", timeout=60000)
-        page.wait_for_load_state("load")
-
-        log_callback("⏳ Đang chờ giao diện Gemini nạp hoàn tất...")
-        time.sleep(3)
-
-        send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+        browser, page, model_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
 
         files_translated_in_session = 0
         BATCH_SIZE = 3
@@ -403,10 +351,9 @@ def run_auto_translate_srt(
 
             log_callback(f"\n--- 🎬 Đang xử lý tệp phụ đề: {file_name} ({total_blocks} block) ---")
 
-            # ── TRƯỜNG HỢP 1: TỆP LỚN (>100 BLOCK) ➔ TÁCH FILE, DỊCH TUẦN TỰ VÀ GỘP ──
+            # Danh sách tệp cần dịch (Nếu >100 block thì tách file nhỏ)
             if total_blocks > blocks_per_split:
-                log_callback(f"📦 Phát hiện tệp SRT lớn ({total_blocks} block > {blocks_per_split}). Tự động kích hoạt chế độ TÁCH FILE...")
-                
+                log_callback(f"📦 Tệp lớn ({total_blocks} block > {blocks_per_split}). Tự động TÁCH FILE...")
                 temp_split_cn_dir = os.path.join(cn_folder, f"temp_split_cn_{raw_title}")
                 temp_split_vi_dir = os.path.join(vi_folder, f"temp_split_vi_{raw_title}")
                 os.makedirs(temp_split_cn_dir, exist_ok=True)
@@ -417,55 +364,55 @@ def run_auto_translate_srt(
 
                 split_files = [f for f in os.listdir(temp_split_cn_dir) if f.endswith('.srt')]
                 split_files.sort(key=sort_by_number)
-
-                all_parts_ok = True
-                for part_name in split_files:
-                    part_cn_path = os.path.join(temp_split_cn_dir, part_name)
-                    part_vi_path = os.path.join(temp_split_vi_dir, part_name)
-
-                    if files_translated_in_session >= BATCH_SIZE:
-                        log_callback(f"\n🔄 [HỆ THỐNG] Đã hoàn thành mẻ {BATCH_SIZE} tệp nhỏ. Làm mới phiên chat...")
-                        try:
-                            page.goto("https://gemini.google.com/app", timeout=45000)
-                            page.wait_for_load_state("load")
-                            time.sleep(4)
-                            send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
-                            files_translated_in_session = 0
-                        except Exception as e:
-                            log_callback(f"⚠️ Cảnh báo làm mới: {e}")
-
-                    log_callback(f"🔹 Đang dịch tệp nhỏ: {part_name}...")
-                    part_ok = translate_single_srt_file(
-                        page, part_cn_path, part_vi_path, prompt_file, 
-                        wait_time=wait_time, log_callback=log_callback, check_pause_callback=check_pause_callback
-                    )
-                    
-                    if part_ok:
-                        files_translated_in_session += 1
-                        countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:", check_pause_callback=check_pause_callback)
-                    else:
-                        all_parts_ok = False
-                        log_callback(f"❌ Không thể dịch tệp nhỏ {part_name}. Bỏ qua tệp lớn này.")
-                        break
-
-                if all_parts_ok:
-                    out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
-                    final_vi_path = os.path.join(vi_folder, out_filename)
-                    log_callback(f"\n🧩 Đang tiến hành GỘP TẤT CẢ các tệp nhỏ đã dịch thành: {out_filename}...")
-                    merge_numbered_srt_files(temp_split_vi_dir, final_vi_path, log_callback=log_callback)
-                    log_callback(f"🎉 HOÀN THÀNH GỘP PHỤ ĐỀ TIẾNG VIỆT HOÀN CHỈNH: {final_vi_path}", "success")
-
-                # Dọn dẹp thư mục tạm
-                try:
-                    shutil.rmtree(temp_split_cn_dir, ignore_errors=True)
-                    shutil.rmtree(temp_split_vi_dir, ignore_errors=True)
-                except Exception:
-                    pass
-
-            # ── TRƯỜNG HỢP 2: TỆP NHỎ (<=100 BLOCK) ➔ DỊCH TRỰC TIẾP ──
+                targets = [(os.path.join(temp_split_cn_dir, sf), os.path.join(temp_split_vi_dir, sf), sf) for sf in split_files]
+                is_batch_split = True
             else:
+                out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
+                targets = [(cn_file_path, os.path.join(vi_folder, out_filename), file_name)]
+                is_batch_split = False
+
+            all_targets_ok = True
+            for part_cn_path, part_vi_path, part_label in targets:
+
+                # Kiểm tra hạn mức Pro trước khi dịch tệp
+                status, model_name = check_model_status(page, log_callback)
+                if status == "FLASH_LITE":
+                    log_callback(f"⚠️ Profile [{current_profile}] bị hạ cấp xuống Flash-Lite (Hết hạn mức Pro trong ngày)!", "warning")
+                    
+                    # Tìm Profile tiếp theo còn hạn mức Pro
+                    switched_ok = False
+                    start_idx = current_profile_idx
+                    while True:
+                        current_profile_idx = (current_profile_idx + 1) % len(available_profiles)
+                        if current_profile_idx == start_idx:
+                            # Đã đi hết tất cả các Profile mà tất cả đều hết hạn mức
+                            break
+                            
+                        next_profile = available_profiles[current_profile_idx]
+                        log_callback(f"🔄 TỰ ĐỘNG CHUYỂN SANG PROFILE TIẾP THEO: [{next_profile}]...", "info")
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+                            
+                        current_profile = next_profile
+                        browser, page, new_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
+                        if new_status != "FLASH_LITE":
+                            switched_ok = True
+                            log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG! Tiếp tục duy trì Mô hình Pro 🚀", "success")
+                            break
+
+                    if not switched_ok:
+                        log_callback("🛑 TẤT CẢ CÁC PROFILE CHROME ĐỀU ĐÃ HẾT HẠN MỨC PRO! Tạm dừng 60 phút chờ Gemini reset...")
+                        countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:", check_pause_callback=check_pause_callback)
+                        page.goto("https://gemini.google.com/app", timeout=60000)
+                        page.wait_for_load_state("load")
+                        time.sleep(5)
+                        send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+
+                # Làm mới mẻ chat nếu cần
                 if files_translated_in_session >= BATCH_SIZE:
-                    log_callback(f"\n🔄 [HỆ THỐNG] Đã hoàn thành mẻ {BATCH_SIZE} file. Làm mới phiên chat...")
+                    log_callback(f"\n🔄 [HỆ THỐNG] Đã hoàn thành mẻ {BATCH_SIZE} tệp. Làm mới phiên chat...")
                     try:
                         page.goto("https://gemini.google.com/app", timeout=45000)
                         page.wait_for_load_state("load")
@@ -475,15 +422,79 @@ def run_auto_translate_srt(
                     except Exception as e:
                         log_callback(f"⚠️ Cảnh báo làm mới: {e}")
 
-                out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
-                vi_file_path = os.path.join(vi_folder, out_filename)
+                log_callback(f"🔹 Đang dịch tệp: {part_label}...")
                 
-                ok = translate_single_srt_file(
-                    page, cn_file_path, vi_file_path, prompt_file, 
-                    wait_time=wait_time, log_callback=log_callback, check_pause_callback=check_pause_callback
+                # Thực hiện dịch
+                MAX_RETRIES = 3
+                part_ok = False
+                short_prompt = (
+                    "Hãy dịch toàn bộ nội dung file SRT đính kèm sang Tiếng Việt chuẩn văn phong phim.\n"
+                    "NHẮC LẠI LUẬT BẮT BUỘC:\n"
+                    "- Giữ nguyên 100% cấu trúc ID và mốc thời gian (Timeline).\n"
+                    "- CHỈ trả về duy nhất nội dung file SRT đã dịch và BẮT BUỘC đặt trong khối code block markdown (```srt\n...\n```).\n"
+                    "- Không thêm bất kỳ câu chào hay lời giải thích nào ngoài khối code block."
                 )
-                if ok:
+
+                for attempt in range(1, MAX_RETRIES + 1):
+                    if attempt > 1:
+                        log_callback(f"\n♻️ TIẾN HÀNH DỊCH LẠI {part_label} (Lần thử: {attempt}/{MAX_RETRIES})...")
+
+                    initial_count = upload_srt_and_send(page, part_cn_path, short_prompt, log_callback)
+                    if initial_count is None:
+                        log_callback("❌ Gửi prompt thất bại. Tải lại trang...")
+                        page.goto("https://gemini.google.com/app", timeout=45000)
+                        page.wait_for_load_state("load")
+                        time.sleep(4)
+                        send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+                        continue
+
+                    success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback, check_pause_callback=check_pause_callback)
+                    responses = page.locator('.model-response-text').all_inner_texts()
+                    
+                    if responses:
+                        latest_response = responses[-1]
+                        clean_srt = clean_gemini_output(latest_response)
+                        clean_srt = re.sub(r'\[cite:\s*\d+\]', '', clean_srt)
+
+                        os.makedirs(os.path.dirname(os.path.abspath(part_vi_path)), exist_ok=True)
+                        with open(part_vi_path, "w", encoding="utf-8") as f:
+                            f.write(clean_srt)
+                        
+                        log_callback(f"⚖️ Đang kiểm tra cấu trúc mốc thời gian cho: {os.path.basename(part_vi_path)}...")
+                        if is_srt_structure_match(part_cn_path, part_vi_path, log_callback):
+                            log_callback(f"✅ ĐẠT YÊU CẦU! Đã dịch xong: {part_label}", "success")
+                            part_ok = True
+                            break
+                        else:
+                            log_callback(f"🗑️ LỖI CẤU TRÚC: AI làm hỏng mốc thời gian. Đang thử dịch lại...")
+                            if os.path.exists(part_vi_path):
+                                os.remove(part_vi_path)
+                            page.goto("https://gemini.google.com/app", timeout=45000)
+                            page.wait_for_load_state("load")
+                            time.sleep(4)
+                            send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+                            time.sleep(3)
+
+                if part_ok:
                     files_translated_in_session += 1
                     countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:", check_pause_callback=check_pause_callback)
+                else:
+                    all_targets_ok = False
+                    log_callback(f"❌ Thất bại khi dịch phần {part_label}.")
+                    break
+
+            # Nếu là tệp lớn đã tách ➔ Tiến hành gộp sau khi dịch xong tất cả các part
+            if is_batch_split and all_targets_ok:
+                out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
+                final_vi_path = os.path.join(vi_folder, out_filename)
+                log_callback(f"\n🧩 Đang tiến hành GỘP TẤT CẢ các tệp nhỏ đã dịch thành: {out_filename}...")
+                merge_numbered_srt_files(temp_split_vi_dir, final_vi_path, log_callback=log_callback)
+                log_callback(f"🎉 HOÀN THÀNH GỘP PHỤ ĐỀ TIẾNG VIỆT HOÀN CHỈNH: {final_vi_path}", "success")
+
+                try:
+                    shutil.rmtree(temp_split_cn_dir, ignore_errors=True)
+                    shutil.rmtree(temp_split_vi_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
         log_callback("\n🎉 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH DỊCH & GỘP PHỤ ĐỀ SANG TIẾNG VIỆT!")
