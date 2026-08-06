@@ -2,7 +2,13 @@ import os
 import shutil
 import time
 import re
-from src.gemini_translate import force_kill_chrome, send_initial_prompt, upload_srt_and_send, smart_wait_for_gemini, check_model_status, clean_gemini_output, countdown_sleep
+from src.gemini_core import (
+    force_kill_chrome,
+    clean_gemini_output,
+    countdown_sleep,
+    resolve_profile_path
+)
+from src.gemini_translate import send_initial_prompt, upload_srt_and_send, smart_wait_for_gemini, check_model_status
 from src.batch_replace_srt import replace_blocks_in_folder
 from playwright.sync_api import sync_playwright
 
@@ -47,7 +53,8 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
 
     # 3. KHỞI CHẠY PLAYWRIGHT VÀ CHỜ ĐĂNG NHẬP
     with sync_playwright() as p:
-        user_data_dir = f"./{profile_folder}" 
+        user_data_dir = resolve_profile_path(profile_folder)
+        log_callback(f"🌐 Đang sử dụng Chrome Profile tại: {user_data_dir}")
         browser = p.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             headless=False,

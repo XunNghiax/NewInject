@@ -11,7 +11,10 @@ from src.gemini_core import (
     force_kill_chrome,
     countdown_sleep,
     parse_srt_structure,
-    is_srt_structure_match
+    is_srt_structure_match,
+    get_matched_blocks_count,
+    resolve_profile_path,
+    get_available_profiles
 )
 from src.srt_utils import split_srt_file, merge_numbered_srt_files
 
@@ -33,19 +36,6 @@ def count_srt_blocks(file_path: str) -> int:
     except Exception:
         return 0
 
-
-def get_available_profiles() -> List[str]:
-    """Tự động phát hiện các thư mục Profile Chrome đã tạo (chrome_data_1, chrome_data_2, ...)."""
-    profiles = []
-    for i in range(1, 10):
-        p_dir = f"chrome_data_{i}"
-        if os.path.exists(p_dir):
-            profiles.append(p_dir)
-    if not profiles:
-        profiles = ["chrome_data_1", "chrome_data_2"]
-        os.makedirs("chrome_data_1", exist_ok=True)
-        os.makedirs("chrome_data_2", exist_ok=True)
-    return profiles
 
 
 def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None):
@@ -129,21 +119,52 @@ def smart_wait_for_gemini(page, initial_count: int, max_wait_time: int, log_call
 
 
 def check_model_status(page, log_callback: Callable = print) -> Tuple[str, str]:
-    """Kiểm tra tên mô hình Gemini và báo trạng thái xem có bị hạ cấp Flash-Lite không."""
+    """
+    Quét thông minh tên mô hình Gemini và báo trạng thái:
+    - Trả về ("FLASH_LITE", text) nếu bị hạ cấp xuống Flash-Lite / Flash / Hết hạn ngạch Pro
+    - Trả về ("NORMAL", text) nếu đang ở Gemini Pro / Advanced / 1.5 Pro
+    """
     try:
-        page.wait_for_selector('button', timeout=4000)
-        buttons = page.locator('button').all()
-        for btn in buttons:
-            if btn.is_visible():
-                text = btn.inner_text().strip()
-                if "Gemini" in text or "Flash" in text or "Pro" in text or "Advanced" in text:
-                    if "Flash-Lite" in text or "Flash Lite" in text:
-                        return "FLASH_LITE", text
-                    else:
-                        return "NORMAL", text
-    except Exception:
-        pass
-    return "NORMAL", "Gemini Pro/Flash"
+        page.wait_for_timeout(1500)
+        
+        # 1. Tìm tất cả các phần tử giao diện hiển thị tên mô hình Gemini
+        selectors = [
+            'bard-mode-switcher', 'gmp-model-picker', '[aria-label*="model" i]',
+            '[aria-label*="gemini" i]', '[aria-label*="chế độ" i]', '.model-picker-button',
+            'button', '[role="button"]', '[role="combobox"]', 'mat-select', '.model-title'
+        ]
+        
+        found_model_text = ""
+        for sel in selectors:
+            try:
+                elements = page.locator(sel).all()
+                for el in elements:
+                    if el.is_visible():
+                        txt = el.inner_text().strip()
+                        if any(kw in txt.lower() for kw in ["gemini", "pro", "flash", "advanced", "lite", "fast", "1.5"]):
+                            found_model_text = txt
+                            # Kiểm tra xem có từ khóa bị hạ cấp không
+                            if any(down in txt.lower() for down in ["flash-lite", "flash lite", "fast", "hạ cấp", "giới hạn"]):
+                                if "advanced" not in txt.lower() and "pro" not in txt.lower():
+                                    return "FLASH_LITE", f"Đã hạ cấp: {txt}"
+            except Exception:
+                pass
+
+        # 2. Quét thông báo popup/banner cảnh báo hết quota trên màn hình
+        content_lower = page.content().lower()
+        if any(msg in content_lower for msg in [
+            "flash-lite", "flash lite", "đạt đến giới hạn", "reached your limit",
+            "chuyển sang flash", "switched to flash", "hết lượt dùng pro"
+        ]):
+            return "FLASH_LITE", "Phát hiện thông báo hết hạn ngạch Gemini Pro (Chuyển Flash-Lite)"
+
+        if found_model_text:
+            return "NORMAL", found_model_text
+
+    except Exception as e:
+        log_callback(f"⚠️ Cảnh báo khi kiểm tra model: {e}")
+
+    return "NORMAL", "Gemini Pro/Advanced"
 
 
 def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback: Callable = print) -> Optional[int]:
@@ -277,13 +298,13 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
 
 
 def create_browser_context(p, profile_folder: str, prompt_file: str, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None):
-    """Tạo phiên làm việc trình duyệt mới với Profile chỉ định."""
-    log_callback(f"🌐 Đang mở trình duyệt với Profile: [{profile_folder}]...")
-    user_data_dir = f"./{profile_folder}"
-    os.makedirs(user_data_dir, exist_ok=True)
+    """Tạo phiên làm việc trình duyệt mới và KIỂM TRA MÔ HÌNH TRƯỚC KHI GỬI PROMPT."""
+    target_dir = resolve_profile_path(profile_folder)
+    log_callback(f"🌐 Đang mở trình duyệt với Profile: [{profile_folder}] ({target_dir})...")
+    os.makedirs(target_dir, exist_ok=True)
     
     browser = p.chromium.launch_persistent_context(
-        user_data_dir=user_data_dir,
+        user_data_dir=target_dir,
         headless=False,
         channel="chrome",
         args=["--start-maximized", "--disable-blink-features=AutomationControlled"]
@@ -292,13 +313,67 @@ def create_browser_context(p, profile_folder: str, prompt_file: str, log_callbac
     page.goto("https://gemini.google.com/app", timeout=60000)
     page.wait_for_load_state("load")
 
-    log_callback(f"⏳ Đang chờ giao diện Gemini nạp trên Profile [{profile_folder}]...")
+    log_callback(f"⏳ Đang kiểm tra phiên bản Gemini AI trên Profile [{profile_folder}]...")
     time.sleep(3)
-    send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
     
+    # 🔍 KIỂM TRA PHIÊN BẢN MODEL TRƯỚC KHI GỬI BẤT KỲ PROMPT NÀO
     status, model_name = check_model_status(page, log_callback)
-    log_callback(f"ℹ️ Trạng thái Mô Hình Profile [{profile_folder}]: {model_name}", "info")
+    if status == "FLASH_LITE":
+        log_callback(f"⚠️ CẢNH BÁO TRƯỚC KHI GỬI PROMPT: Profile [{profile_folder}] bị hạ cấp ({model_name})!", "warning")
+        return browser, page, status
+
+    log_callback(f"✅ XÁC NHẬN MÔ HÌNH HỢP LỆ: {model_name} 🚀 -> Tiến hành nạp Prompt dịch mẫu...", "success")
+    send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
     return browser, page, status
+
+
+def find_existing_translated_file(cn_file_path: str, vi_folder: str) -> Optional[str]:
+    """
+    Tìm file phụ đề tiếng Việt đã dịch (nằm ở thư mục vi hoặc temp_split_vi_)
+    trùng khớp cấu trúc với cn_file_path. Bắt buộc KHÔNG so sánh với chính file gốc cn_file_path.
+    """
+    if not os.path.exists(cn_file_path):
+        return None
+        
+    cn_file_path_abs = os.path.abspath(cn_file_path)
+    filename = os.path.basename(cn_file_path)
+    raw_title = os.path.splitext(filename)[0]
+    cn_dir = os.path.dirname(cn_file_path_abs)
+    vi_folder_abs = os.path.abspath(vi_folder)
+    
+    candidates = [
+        os.path.join(vi_folder_abs, f"{raw_title}_vi.srt"),
+        os.path.join(vi_folder_abs, f"{raw_title}.srt"),
+        os.path.join(vi_folder_abs, filename),
+    ]
+
+    # Nếu cn_file_path thuộc thư mục temp_split_cn_XYZ -> Quét các thư mục temp_split_vi_XYZ
+    parent_folder_name = os.path.basename(cn_dir)
+    if parent_folder_name.startswith("temp_split_cn_"):
+        suffix = parent_folder_name.replace("temp_split_cn_", "")
+        vi_temp_dir = os.path.join(vi_folder_abs, f"temp_split_vi_{suffix}")
+        same_level_vi_temp = os.path.abspath(os.path.join(cn_dir, "..", f"temp_split_vi_{suffix}"))
+        
+        for v_dir in [vi_temp_dir, same_level_vi_temp]:
+            candidates.extend([
+                os.path.join(v_dir, filename),
+                os.path.join(v_dir, f"{raw_title}_vi.srt"),
+                os.path.join(v_dir, f"{raw_title}.srt"),
+            ])
+
+    # Lọc bỏ tuyệt đối file gốc cn_file_path để tránh tự so sánh với chính nó
+    valid_candidates = []
+    for cand in candidates:
+        cand_abs = os.path.abspath(cand)
+        if cand_abs != cn_file_path_abs and cand_abs not in valid_candidates:
+            valid_candidates.append(cand_abs)
+
+    # Kiểm tra sự tồn tại và khớp cấu trúc mốc thời gian
+    for cand in valid_candidates:
+        if os.path.exists(cand):
+            if is_srt_structure_match(cn_file_path_abs, cand):
+                return cand
+    return None
 
 
 def run_auto_translate_srt(
@@ -335,11 +410,38 @@ def run_auto_translate_srt(
         return
 
     available_profiles = get_available_profiles()
-    current_profile_idx = 0
+    if profile_folder and profile_folder in available_profiles:
+        current_profile_idx = available_profiles.index(profile_folder)
+    elif profile_folder and profile_folder not in available_profiles:
+        available_profiles.insert(0, profile_folder)
+        current_profile_idx = 0
+    else:
+        current_profile_idx = 0
+
     current_profile = available_profiles[current_profile_idx]
+    log_callback(f"📋 Tìm thấy {len(available_profiles)} Profile Chrome: {', '.join(available_profiles)} (Bắt đầu với [{current_profile}])")
 
     with sync_playwright() as p:
         browser, page, model_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
+        if model_status == "FLASH_LITE":
+            start_idx = current_profile_idx
+            switched_ok = False
+            while True:
+                current_profile_idx = (current_profile_idx + 1) % len(available_profiles)
+                if current_profile_idx == start_idx:
+                    break
+                next_profile = available_profiles[current_profile_idx]
+                log_callback(f"🔄 Profile ban đầu [{current_profile}] bị hạ cấp. TỰ ĐỘNG CHUYỂN SANG: [{next_profile}]...", "info")
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                current_profile = next_profile
+                browser, page, model_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
+                if model_status != "FLASH_LITE":
+                    switched_ok = True
+                    log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG! 🚀", "success")
+                    break
 
         files_translated_in_session = 0
         BATCH_SIZE = 3
@@ -347,8 +449,16 @@ def run_auto_translate_srt(
         for file_name in srt_files:
             cn_file_path = os.path.join(cn_folder, file_name)
             raw_title = os.path.splitext(file_name)[0]
-            total_blocks = count_srt_blocks(cn_file_path)
+            out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
+            final_target_vi = os.path.join(vi_folder, out_filename)
 
+            # CẤP ĐỘ 1: Kiểm tra tệp đích cuối cùng đã dịch hoàn tất chưa ở tất cả vị trí
+            existing_final = find_existing_translated_file(cn_file_path, vi_folder)
+            if existing_final:
+                log_callback(f"⏩ Tệp '{file_name}' đã được dịch hoàn tất từ trước tại [{os.path.basename(existing_final)}]. TỰ ĐỘNG BỎ QUA TIẾP TỤC TỆP TIẾP THEO!", "success")
+                continue
+
+            total_blocks = count_srt_blocks(cn_file_path)
             log_callback(f"\n--- 🎬 Đang xử lý tệp phụ đề: {file_name} ({total_blocks} block) ---")
 
             # Danh sách tệp cần dịch (Nếu >100 block thì tách file nhỏ)
@@ -367,12 +477,17 @@ def run_auto_translate_srt(
                 targets = [(os.path.join(temp_split_cn_dir, sf), os.path.join(temp_split_vi_dir, sf), sf) for sf in split_files]
                 is_batch_split = True
             else:
-                out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
-                targets = [(cn_file_path, os.path.join(vi_folder, out_filename), file_name)]
+                targets = [(cn_file_path, final_target_vi, file_name)]
                 is_batch_split = False
 
             all_targets_ok = True
             for part_cn_path, part_vi_path, part_label in targets:
+
+                # CẤP ĐỘ 2: Kiểm tra phân đoạn nhỏ (Checkpoint) ở tất cả vị trí khả dĩ
+                existing_part = find_existing_translated_file(part_cn_path, vi_folder)
+                if existing_part:
+                    log_callback(f"⏩ [CHECKPOINT] Phân đoạn '{part_label}' đã dịch hoàn tất trước đó tại [{os.path.basename(existing_part)}]. BỎ QUA CHUYỂN SANG TỆP TIẾP THEO!", "info")
+                    continue
 
                 # Kiểm tra hạn mức Pro trước khi dịch tệp
                 status, model_name = check_model_status(page, log_callback)

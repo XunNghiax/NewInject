@@ -9,11 +9,11 @@ from datetime import datetime
 # [FIX] CPS_MID < CPS_HIGH < CPS_CRITICAL — 3 mức tách biệt, không trùng nhau
 # Ngưỡng tính trên char KHÔNG có space (len(text.replace(' ', '')))
 # và sau khi đã trừ thời gian pause ước tính của dấu câu
-CPS_CRITICAL        = 24    # CPS ngưỡng CRITICAL — TTS sẽ nuốt âm hoặc drop
-CPS_HIGH            = 22    # CPS ngưỡng WARNING — cần rút ngắn bắt buộc
-#CPS_MID             = 18    # CPS ngưỡng WARNING NHẸ — Repair Engine nên rút ngắn
+CPS_CRITICAL         = 40    # Ngưỡng chết: Bắt buộc phải sửa vì TTS sẽ hỏng hoàn toàn
+CPS_CONSECUTIVE_WARN = 35    # Ngưỡng dồn toa: CPS > 35 bắt đầu gây hẹp timeline
+MAX_CONSECUTIVE      = 2     # Số block liên tiếp vượt CPS_CONSECUTIVE_WARN bị coi là kẹt timeline
 
-GAP_WARN_THRESHOLD  = 10.0  # Khoảng trống giữa 2 block (giây) bị coi là bất thường
+GAP_WARN_THRESHOLD   = 10.0  # Khoảng trống giữa 2 block (giây) bị coi là bất thường
 
 # Pause ước tính (giây) mỗi loại dấu câu — dùng để tính effective_duration
 PAUSE_COMMA         = 0.20  # dấu phẩy
@@ -249,17 +249,15 @@ def analyze_single_srt(file_path, log_callback=print, scan_mode='all'):
             elif dur < 0.5:
                 errors.append(f"WARNING: Duration quá ngắn ({dur}s) — TTS có thể không kịp render")
 
-            # [FIX] Dùng cps_effective thay vì cps_raw
-            # [FIX] 3 ngưỡng tách biệt CPS_MID < CPS_HIGH < CPS_CRITICAL
             cps = block['cps']
             if cps > CPS_CRITICAL:
                 errors.append(
                     f"CRITICAL: CPS = {cps} (ngưỡng {CPS_CRITICAL}) "
                     f"— TTS sẽ nuốt âm hoặc bị drop từ"
                 )
-            elif cps > CPS_HIGH:
+            elif cps > CPS_CONSECUTIVE_WARN:
                 errors.append(
-                    f"WARNING: CPS = {cps} (ngưỡng {CPS_HIGH}) "
+                    f"WARNING: CPS = {cps} (ngưỡng {CPS_CONSECUTIVE_WARN}) "
                     f"— cần rút ngắn nội dung"
                 )
             # elif cps > CPS_MID:

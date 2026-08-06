@@ -102,6 +102,29 @@ class BilibiliDownloader:
 
         status = d.get("status")
         if status == "downloading":
+            if not getattr(self, "_logged_resolution", False):
+                info_dict = d.get("info_dict", {})
+                width = info_dict.get("width")
+                height = info_dict.get("height")
+                fps = info_dict.get("fps")
+                format_note = info_dict.get("format_note")
+                vcodec = info_dict.get("vcodec")
+                
+                if height or width:
+                    res_parts = []
+                    if height:
+                        res_parts.append(f"{height}p")
+                    if width and height:
+                        res_parts.append(f"({width}x{height})")
+                    if fps:
+                        res_parts.append(f"@{fps}fps")
+                    if format_note:
+                        res_parts.append(f"[{format_note}]")
+                    
+                    res_str = " ".join(res_parts)
+                    self.log_fn(f"🎬 Độ phân giải đang tải: {res_str}", "info")
+                    self._logged_resolution = True
+
             total_bytes = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
             downloaded_bytes = d.get("downloaded_bytes", 0)
             
@@ -187,6 +210,7 @@ class BilibiliDownloader:
 
         last_error = None
         for browser_id, browser_name in attempts:
+            self._logged_resolution = False
             ydl_opts = base_ydl_opts.copy()
             if browser_id == "file":
                 ydl_opts["cookiefile"] = found_cookie_file
