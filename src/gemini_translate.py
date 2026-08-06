@@ -13,6 +13,7 @@ from src.gemini_core import (
     parse_srt_structure,
     is_srt_structure_match
 )
+from src.srt_utils import split_srt_file, merge_numbered_srt_files
 
 
 def sanitize_filename(filename: str) -> str:
@@ -20,6 +21,17 @@ def sanitize_filename(filename: str) -> str:
     clean = re.sub(r'[\\/:*?"<>|]', '', filename)
     clean = re.sub(r'\s+', ' ', clean).strip()
     return clean if clean else "Bilibili_Video_Vi"
+
+
+def count_srt_blocks(file_path: str) -> int:
+    """Đếm tổng số lượng block SRT trong tệp."""
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+        matches = re.findall(r'(?m)^(\d+)\s*\n\d{2}:\d{2}:\d{2}', content)
+        return len(matches)
+    except Exception:
+        return 0
 
 
 def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = print, check_pause_callback: Optional[Callable] = None):
@@ -121,16 +133,14 @@ def check_model_status(page, log_callback: Callable = print) -> str:
 
 def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback: Callable = print) -> Optional[int]:
     """
-    Truyền nội dung SRT cho Gemini AI:
-    - Ưu tiên upload file .srt qua File Chooser
-    - Nếu Nút Upload lỗi/đổi DOM: Tự động FALLBACK dán trực tiếp toàn bộ văn bản SRT vào khung prompt (100% Không bao giờ thất bại)
+    Truyền nội dung SRT cho Gemini AI qua File Upload hoặc Direct Text Paste (100% Fail-safe)
     """
     initial_count = page.locator('.model-response-text').count()
     uploaded = False
     
     log_callback(f"🔍 Đang chuẩn bị truyền file SRT: {os.path.basename(cn_file_path)}...")
     
-    # 1. Ưu tiên đính kèm file trực tiếp qua hidden input[type="file"] của Gemini (Nhanh nhất & Chính xác 100%)
+    # 1. Thử Upload File
     try:
         file_inputs = page.locator('input[type="file"]').all()
         for inp in file_inputs:
@@ -144,10 +154,9 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
     except Exception:
         pass
 
-    # 2. Nếu gán input trực tiếp chưa được, thử qua Hộp thoại File Chooser
     if not uploaded:
         try:
-            with page.expect_file_chooser(timeout=4000) as fc_info:
+            with page.expect_file_chooser(timeout=3000) as fc_info:
                 chat_box = page.locator('div[contenteditable="true"]').first
                 chat_box.wait_for(state="visible", timeout=3000)
                 box = chat_box.bounding_box()
@@ -252,6 +261,86 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
         return None
 
 
+def translate_single_srt_file(
+    page,
+    cn_file_path: str,
+    vi_file_path: str,
+    prompt_file: str,
+    wait_time: int = 300,
+    log_callback: Callable = print,
+    check_pause_callback: Optional[Callable] = None
+) -> bool:
+    """Hàm xử lý dịch 1 file SRT đơn lẻ qua Gemini AI."""
+    file_name = os.path.basename(cn_file_path)
+    MAX_RETRIES = 3
+    attempt = 0
+
+    short_prompt = (
+        "Hãy dịch toàn bộ nội dung file SRT đính kèm sang Tiếng Việt chuẩn văn phong phim.\n"
+        "NHẮC LẠI LUẬT BẮT BUỘC:\n"
+        "- Giữ nguyên 100% cấu trúc ID và mốc thời gian (Timeline).\n"
+        "- CHỈ trả về duy nhất nội dung file SRT đã dịch và BẮT BUỘC đặt trong khối code block markdown (```srt\n...\n```).\n"
+        "- Không thêm bất kỳ câu chào hay lời giải thích nào ngoài khối code block."
+    )
+
+    while attempt < MAX_RETRIES:
+        attempt += 1
+        if attempt > 1:
+            log_callback(f"\n♻️ TIẾN HÀNH DỊCH LẠI {file_name} (Lần thử: {attempt}/{MAX_RETRIES})...")
+
+        while True:
+            model_status = check_model_status(page, log_callback)
+            if model_status == "FLASH_LITE":
+                log_callback("🛑 BỊ HẠ CẤP XUỐNG FLASH-LITE! Script tạm dừng 60 phút...")
+                countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:", check_pause_callback=check_pause_callback)
+                page.goto("https://gemini.google.com/app", timeout=60000)
+                page.wait_for_load_state("load")
+                time.sleep(5)
+                send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+            else:
+                break
+
+        initial_count = upload_srt_and_send(page, cn_file_path, short_prompt, log_callback)
+        if initial_count is None:
+            log_callback("❌ Gửi prompt thất bại. Tải lại trang...")
+            page.goto("https://gemini.google.com/app", timeout=45000)
+            page.wait_for_load_state("load")
+            time.sleep(4)
+            send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+            continue
+
+        success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback, check_pause_callback=check_pause_callback)
+        responses = page.locator('.model-response-text').all_inner_texts()
+        
+        if responses:
+            latest_response = responses[-1]
+            clean_srt = clean_gemini_output(latest_response)
+            clean_srt = re.sub(r'\[cite:\s*\d+\]', '', clean_srt)
+
+            os.makedirs(os.path.dirname(os.path.abspath(vi_file_path)), exist_ok=True)
+            with open(vi_file_path, "w", encoding="utf-8") as f:
+                f.write(clean_srt)
+            
+            log_callback(f"⚖️ Đang kiểm tra cấu trúc mốc thời gian cho: {os.path.basename(vi_file_path)}...")
+            if is_srt_structure_match(cn_file_path, vi_file_path, log_callback):
+                log_callback(f"✅ ĐẠT YÊU CẦU! Đã dịch xong tệp phụ đề SRT sang Tiếng Việt.", "success")
+                return True
+            else:
+                log_callback(f"🗑️ LỖI CẤU TRÚC: AI làm hỏng mốc thời gian. Đang thử dịch lại...")
+                if os.path.exists(vi_file_path):
+                    os.remove(vi_file_path)
+                
+                page.goto("https://gemini.google.com/app", timeout=45000)
+                page.wait_for_load_state("load")
+                time.sleep(4)
+                send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+                time.sleep(3)
+        else:
+            log_callback("❌ Không nhận được phản hồi từ AI. Thử lại...")
+
+    return False
+
+
 def run_auto_translate_srt(
     prompt_file: str,
     cn_folder: str,
@@ -261,10 +350,14 @@ def run_auto_translate_srt(
     log_callback: Callable = print,
     profile_folder: str = "chrome_data_1",
     check_pause_callback: Optional[Callable] = None,
+    blocks_per_split: int = 100,
     **kwargs
 ):
     """
-    Tiến trình chính dịch toàn bộ file SRT trong thư mục nguồn và tự động dịch Tiêu đề File sang Tiếng Việt
+    Tiến trình dịch phụ đề tự động:
+    - Nếu file SRT lớn (>100 block), tự động TÁCH THÀNH CÁC FILE NHỎ 100 block vào thư mục tạm.
+    - Gửi dịch lần lượt từng file nhỏ qua Gemini AI.
+    - Tự động GỘP THÀNH FILE SRT TIẾNG VIỆT HOÀN CHỈNH duy nhất và dọn dẹp thư mục tạm.
     """
     force_kill_chrome(log_callback)
     log_callback("🚀 Khởi động trình duyệt Playwright...")
@@ -298,107 +391,99 @@ def run_auto_translate_srt(
         log_callback("⏳ Đang chờ giao diện Gemini nạp hoàn tất...")
         time.sleep(3)
 
-        send_initial_prompt(page, prompt_file, log_callback)
+        send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
 
         files_translated_in_session = 0
         BATCH_SIZE = 3
-        MAX_RETRIES = 3
 
         for file_name in srt_files:
             cn_file_path = os.path.join(cn_folder, file_name)
             raw_title = os.path.splitext(file_name)[0]
+            total_blocks = count_srt_blocks(cn_file_path)
 
-            if files_translated_in_session >= BATCH_SIZE:
-                log_callback(f"\n🔄 [HỆ THỐNG] Đã hoàn thành mẻ {BATCH_SIZE} file. Đang làm mới phiên chat...")
-                try:
-                    page.goto("https://gemini.google.com/app", timeout=45000)
-                    page.wait_for_load_state("load")
-                    time.sleep(4)
-                    send_initial_prompt(page, prompt_file, log_callback)
-                    files_translated_in_session = 0
-                except Exception as e:
-                    log_callback(f"⚠️ Cảnh báo làm mới: {e}")
+            log_callback(f"\n--- 🎬 Đang xử lý tệp phụ đề: {file_name} ({total_blocks} block) ---")
 
-            log_callback(f"\n--- Đang xử lý dịch file: {file_name} ---")
-            
-            attempt = 0
-            is_file_success = False
+            # ── TRƯỜNG HỢP 1: TỆP LỚN (>100 BLOCK) ➔ TÁCH FILE, DỊCH TUẦN TỰ VÀ GỘP ──
+            if total_blocks > blocks_per_split:
+                log_callback(f"📦 Phát hiện tệp SRT lớn ({total_blocks} block > {blocks_per_split}). Tự động kích hoạt chế độ TÁCH FILE...")
+                
+                temp_split_cn_dir = os.path.join(cn_folder, f"temp_split_cn_{raw_title}")
+                temp_split_vi_dir = os.path.join(vi_folder, f"temp_split_vi_{raw_title}")
+                os.makedirs(temp_split_cn_dir, exist_ok=True)
+                os.makedirs(temp_split_vi_dir, exist_ok=True)
 
-            while attempt < MAX_RETRIES and not is_file_success:
-                attempt += 1
-                if attempt > 1:
-                    log_callback(f"\n♻️ TIẾN HÀNH DỊCH LẠI {file_name} (Lần thử: {attempt}/{MAX_RETRIES})...")
+                split_prefix = os.path.join(temp_split_cn_dir, "part")
+                split_srt_file(cn_file_path, output_prefix=split_prefix, blocks_per_file=blocks_per_split, log_callback=log_callback)
 
-                while True:
-                    model_status = check_model_status(page, log_callback)
-                    if model_status == "FLASH_LITE":
-                        log_callback("🛑 BỊ HẠ CẤP XUỐNG FLASH-LITE! Script tạm dừng 60 phút...")
-                        countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:")
-                        page.goto("https://gemini.google.com/app", timeout=60000)
-                        page.wait_for_load_state("load")
-                        time.sleep(5)
-                        send_initial_prompt(page, prompt_file, log_callback)
+                split_files = [f for f in os.listdir(temp_split_cn_dir) if f.endswith('.srt')]
+                split_files.sort(key=sort_by_number)
+
+                all_parts_ok = True
+                for part_name in split_files:
+                    part_cn_path = os.path.join(temp_split_cn_dir, part_name)
+                    part_vi_path = os.path.join(temp_split_vi_dir, part_name)
+
+                    if files_translated_in_session >= BATCH_SIZE:
+                        log_callback(f"\n🔄 [HỆ THỐNG] Đã hoàn thành mẻ {BATCH_SIZE} tệp nhỏ. Làm mới phiên chat...")
+                        try:
+                            page.goto("https://gemini.google.com/app", timeout=45000)
+                            page.wait_for_load_state("load")
+                            time.sleep(4)
+                            send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+                            files_translated_in_session = 0
+                        except Exception as e:
+                            log_callback(f"⚠️ Cảnh báo làm mới: {e}")
+
+                    log_callback(f"🔹 Đang dịch tệp nhỏ: {part_name}...")
+                    part_ok = translate_single_srt_file(
+                        page, part_cn_path, part_vi_path, prompt_file, 
+                        wait_time=wait_time, log_callback=log_callback, check_pause_callback=check_pause_callback
+                    )
+                    
+                    if part_ok:
+                        files_translated_in_session += 1
+                        countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:", check_pause_callback=check_pause_callback)
                     else:
+                        all_parts_ok = False
+                        log_callback(f"❌ Không thể dịch tệp nhỏ {part_name}. Bỏ qua tệp lớn này.")
                         break
 
-                short_prompt = (
-                    "Hãy dịch toàn bộ nội dung file SRT đính kèm sang Tiếng Việt chuẩn văn phong phim.\n"
-                    "NHẮC LẠI LUẬT BẮT BUỘC:\n"
-                    "- Giữ nguyên 100% cấu trúc ID và mốc thời gian (Timeline).\n"
-                    "- CHỈ trả về duy nhất nội dung file SRT đã dịch và BẮT BUỘC đặt trong khối code block markdown (```srt\n...\n```).\n"
-                    "- Không thêm bất kỳ câu chào hay lời giải thích nào ngoài khối code block."
-                )
-
-                initial_count = upload_srt_and_send(page, cn_file_path, short_prompt, log_callback)
-                if initial_count is None:
-                    log_callback("❌ Gửi prompt thất bại. Tải lại trang...")
-                    page.goto("https://gemini.google.com/app", timeout=45000)
-                    page.wait_for_load_state("load")
-                    time.sleep(4)
-                    send_initial_prompt(page, prompt_file, log_callback)
-                    continue
-
-                success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback, check_pause_callback=check_pause_callback)
-                responses = page.locator('.model-response-text').all_inner_texts()
-                
-                if responses:
-                    latest_response = responses[-1]
-                    clean_srt = clean_gemini_output(latest_response)
-                    clean_srt = re.sub(r'\[cite:\s*\d+\]', '', clean_srt)
-
-                    # Đặt tên file xuất SRT Tiếng Việt: [Tên_Gốc]_vi.srt hoặc [Tên_Gốc].srt
+                if all_parts_ok:
                     out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
-                    vi_file_path = os.path.join(vi_folder, out_filename)
+                    final_vi_path = os.path.join(vi_folder, out_filename)
+                    log_callback(f"\n🧩 Đang tiến hành GỘP TẤT CẢ các tệp nhỏ đã dịch thành: {out_filename}...")
+                    merge_numbered_srt_files(temp_split_vi_dir, final_vi_path, log_callback=log_callback)
+                    log_callback(f"🎉 HOÀN THÀNH GỘP PHỤ ĐỀ TIẾNG VIỆT HOÀN CHỈNH: {final_vi_path}", "success")
 
-                    # Lưu file SRT dịch
-                    with open(vi_file_path, "w", encoding="utf-8") as f:
-                        f.write(clean_srt)
-                    
-                    # Kiểm tra cấu trúc mốc thời gian với file gốc
-                    log_callback(f"⚖️ Đang kiểm tra cấu trúc mốc thời gian cho: {out_filename}...")
-                    if is_srt_structure_match(cn_file_path, vi_file_path, log_callback):
-                        log_callback(f"✅ ĐẠT YÊU CẦU! Đã dịch xong phụ đề SRT sang Tiếng Việt.")
-                        log_callback(f"📁 Tệp phụ đề Tiếng Việt đã lưu tại: {vi_file_path}", "success")
-                        
-                        files_translated_in_session += 1
-                        is_file_success = True
-                    else:
-                        log_callback(f"🗑️ LỖI CẤU TRÚC: AI làm hỏng mốc thời gian. Đang thử dịch lại...")
-                        if os.path.exists(vi_file_path):
-                            os.remove(vi_file_path)
-                        
+                # Dọn dẹp thư mục tạm
+                try:
+                    shutil.rmtree(temp_split_cn_dir, ignore_errors=True)
+                    shutil.rmtree(temp_split_vi_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+            # ── TRƯỜNG HỢP 2: TỆP NHỎ (<=100 BLOCK) ➔ DỊCH TRỰC TIẾP ──
+            else:
+                if files_translated_in_session >= BATCH_SIZE:
+                    log_callback(f"\n🔄 [HỆ THỐNG] Đã hoàn thành mẻ {BATCH_SIZE} file. Làm mới phiên chat...")
+                    try:
                         page.goto("https://gemini.google.com/app", timeout=45000)
                         page.wait_for_load_state("load")
                         time.sleep(4)
-                        send_initial_prompt(page, prompt_file, log_callback)
-                        time.sleep(3)
-                else:
-                    log_callback("❌ Không nhận được phản hồi từ AI. Thử lại...")
+                        send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
+                        files_translated_in_session = 0
+                    except Exception as e:
+                        log_callback(f"⚠️ Cảnh báo làm mới: {e}")
 
-            if not is_file_success:
-                log_callback(f"⚠️ Bỏ qua file {file_name} sau {MAX_RETRIES} lần thử thất bại.")
+                out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
+                vi_file_path = os.path.join(vi_folder, out_filename)
+                
+                ok = translate_single_srt_file(
+                    page, cn_file_path, vi_file_path, prompt_file, 
+                    wait_time=wait_time, log_callback=log_callback, check_pause_callback=check_pause_callback
+                )
+                if ok:
+                    files_translated_in_session += 1
+                    countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:", check_pause_callback=check_pause_callback)
 
-            log_callback(f"Nghỉ {delay_time}s trước khi chạy file tiếp theo...")
-            countdown_sleep(delay_time, log_callback, "☕ Đang nghỉ:", check_pause_callback=check_pause_callback)
-
-        log_callback("\n🎉 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH DỊCH PHỤ ĐỀ & TIÊU ĐỀ SANG TIẾNG VIỆT!")
+        log_callback("\n🎉 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH DỊCH & GỘP PHỤ ĐỀ SANG TIẾNG VIỆT!")
