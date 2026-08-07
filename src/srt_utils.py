@@ -30,7 +30,7 @@ def merge_numbered_srt_files(input_directory: str, output_file_path: str, log_ca
     srt_files = []
 
     for filename in all_files:
-        match = re.search(r'(\d+)\.srt$', filename, re.IGNORECASE)
+        match = re.search(r'(\d+)(?:_vi)?\.srt$', filename, re.IGNORECASE)
         if match:
             full_path = os.path.join(input_directory, filename)
             file_number = int(match.group(1)) 

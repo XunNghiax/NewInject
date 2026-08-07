@@ -16,7 +16,7 @@ from src.gemini_core import (
     resolve_profile_path,
     get_available_profiles
 )
-from src.srt_utils import split_srt_file, merge_numbered_srt_files
+from src.srt_utils import split_srt_file, merge_numbered_srt_files, process_srt_speed
 
 
 def sanitize_filename(filename: str) -> str:
@@ -347,19 +347,26 @@ def find_existing_translated_file(cn_file_path: str, vi_folder: str) -> Optional
         os.path.join(vi_folder_abs, filename),
     ]
 
-    # Nếu cn_file_path thuộc thư mục temp_split_cn_XYZ -> Quét các thư mục temp_split_vi_XYZ
-    parent_folder_name = os.path.basename(cn_dir)
-    if parent_folder_name.startswith("temp_split_cn_"):
-        suffix = parent_folder_name.replace("temp_split_cn_", "")
-        vi_temp_dir = os.path.join(vi_folder_abs, f"temp_split_vi_{suffix}")
-        same_level_vi_temp = os.path.abspath(os.path.join(cn_dir, "..", f"temp_split_vi_{suffix}"))
-        
-        for v_dir in [vi_temp_dir, same_level_vi_temp]:
-            candidates.extend([
-                os.path.join(v_dir, filename),
-                os.path.join(v_dir, f"{raw_title}_vi.srt"),
-                os.path.join(v_dir, f"{raw_title}.srt"),
-            ])
+    # Nếu cn_file_path nằm trong thư mục con speed_...
+    current_dir_name = os.path.basename(cn_dir)
+    check_dirs = [cn_dir]
+    if current_dir_name.startswith("speed_"):
+        real_parent = os.path.dirname(cn_dir)
+        check_dirs.append(real_parent)
+
+    for c_dir in check_dirs:
+        parent_folder_name = os.path.basename(c_dir)
+        if parent_folder_name.startswith("temp_split_cn_"):
+            suffix = parent_folder_name.replace("temp_split_cn_", "")
+            vi_temp_dir = os.path.join(vi_folder_abs, f"temp_split_vi_{suffix}")
+            same_level_vi_temp = os.path.abspath(os.path.join(c_dir, "..", f"temp_split_vi_{suffix}"))
+            
+            for v_dir in [vi_temp_dir, same_level_vi_temp]:
+                candidates.extend([
+                    os.path.join(v_dir, filename),
+                    os.path.join(v_dir, f"{raw_title}_vi.srt"),
+                    os.path.join(v_dir, f"{raw_title}.srt"),
+                ])
 
     # Lọc bỏ tuyệt đối file gốc cn_file_path để tránh tự so sánh với chính nó
     valid_candidates = []
@@ -386,13 +393,14 @@ def run_auto_translate_srt(
     profile_folder: str = "chrome_data_1",
     check_pause_callback: Optional[Callable] = None,
     blocks_per_split: int = 100,
+    target_speed: float = 0.8,
     **kwargs
 ):
     """
     Tiến trình dịch phụ đề tự động tích hợp CƠ CHẾ XOAY VÒNG ĐA PROFILE CHROME (AUTO PROFILE ROTATION):
     - Tự động kiểm tra phiên bản Gemini AI.
     - Nếu hết hạn ngạch Pro (chuyển sang Flash-Lite) ➔ TỰ ĐỘNG ĐỔI SANG PROFILE TIẾP THEO (chrome_data_2, chrome_data_3...).
-    - Tiếp tục duy trì 100% Mô hình Pro/Flash tốc độ cao liên tục mà không cần chờ 60 phút!
+    - Hỗ trợ tự động dãn mốc thời gian file Tiếng Trung gốc xuống tốc độ 0.8x (`target_speed=0.8`).
     """
     force_kill_chrome(log_callback)
     os.makedirs(vi_folder, exist_ok=True)
@@ -448,6 +456,19 @@ def run_auto_translate_srt(
 
         for file_name in srt_files:
             cn_file_path = os.path.join(cn_folder, file_name)
+
+            # Tự động dãn mốc thời gian file Tiếng Trung gốc xuống 0.8x nếu bật
+            if target_speed and target_speed != 1.0:
+                speed_adj_dir = os.path.join(cn_folder, f"speed_{target_speed}x")
+                os.makedirs(speed_adj_dir, exist_ok=True)
+                adj_cn_file_path = os.path.join(speed_adj_dir, file_name)
+                
+                if not os.path.exists(adj_cn_file_path):
+                    log_callback(f"⏩ [ĐỔI TỐC ĐỘ {target_speed}x] Đang dãn mốc thời gian file gốc '{file_name}' từ 1.0x xuống {target_speed}x...")
+                    process_srt_speed(cn_file_path, adj_cn_file_path, old_speed=1.0, new_speed=target_speed, log_callback=log_callback)
+                
+                cn_file_path = adj_cn_file_path
+
             raw_title = os.path.splitext(file_name)[0]
             out_filename = file_name if file_name.endswith('_vi.srt') else f"{raw_title}_vi.srt"
             final_target_vi = os.path.join(vi_folder, out_filename)

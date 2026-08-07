@@ -30,6 +30,16 @@ try:
 except ImportError:
     run_auto_translate_srt = None
 
+try:
+    from qa_srt_before import analyze_srt_to_file
+except ImportError:
+    analyze_srt_to_file = None
+
+try:
+    from auto_qa_repair import run_auto_qa_repair
+except ImportError:
+    run_auto_qa_repair = None
+
 
 # ==============================================================================
 # WORKER THREAD ĐỒNG BỘ: HỖ TRỢ TẢI REAL-TIME BILIBILI & GIẢ LẬP
@@ -39,7 +49,7 @@ class ProcessWorker(QThread):
     progress_signal = pyqtSignal(int, str)    # (percentage, status_text)
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
 
-    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None):
+    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False):
         super().__init__()
         self.link = link
         self.output_dir = output_dir
@@ -47,6 +57,8 @@ class ProcessWorker(QThread):
         self.auto_translate_srt = auto_translate_srt
         self.local_media_path = local_media_path
         self.srt_translate_path = srt_translate_path
+        self.qa_scan_path = qa_scan_path
+        self.qa_repair_mode = qa_repair_mode
         self._is_paused = False
         self._is_stopped = False
         self.downloader = None
@@ -102,6 +114,69 @@ class ProcessWorker(QThread):
 
     def run(self):
         try:
+            # ── CHẾ ĐỘ QUÉT LỖI QA THỦ CÔNG (QA SCAN) ──
+            if self.qa_scan_path and os.path.exists(self.qa_scan_path):
+                self.log_signal.emit(f"🔍 Khởi chạy tiến trình Quét Lỗi QA Phụ Đề cho: {self.qa_scan_path}", "info")
+                if not analyze_srt_to_file:
+                    self.finished_signal.emit(False, "Modul 'qa_srt_before' chưa sẵn sàng!")
+                    return
+
+                # Xác định thư mục root 'downloads' để tạo thư mục 'report' CÙNG CẤP với các thư mục srt khác
+                root_downloads = os.path.abspath(self.output_dir)
+                report_dir = os.path.join(root_downloads, "report")
+                os.makedirs(report_dir, exist_ok=True)
+
+                if os.path.isfile(self.qa_scan_path):
+                    raw_name = os.path.splitext(os.path.basename(self.qa_scan_path))[0]
+                else:
+                    raw_name = os.path.basename(os.path.abspath(self.qa_scan_path).rstrip("/\\"))
+
+                out_path = os.path.join(report_dir, f"Report_{raw_name}.txt")
+
+                self.progress_signal.emit(20, "Đang quét phân tích lỗi CPS & ngữ pháp phụ đề...")
+                analyze_srt_to_file(
+                    in_path=self.qa_scan_path,
+                    out_path=out_path,
+                    errors_per_file=80,
+                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                    scan_mode='all'
+                )
+                self.progress_signal.emit(100, "Hoàn tất quét lỗi QA 100%! 🎉")
+                self.finished_signal.emit(True, f"🎉 Đã quét lỗi xong! Các file báo cáo lưu tại thư mục 'report' (cùng cấp trong downloads): {report_dir}")
+                return
+
+            # ── CHẾ ĐỘ GỬI GEMINI AI VÁ LỖI QA THỦ CÔNG (QA REPAIR) ──
+            if self.qa_repair_mode:
+                self.log_signal.emit("🩺 Khởi chạy Gemini AI đọc báo cáo và tự động vá lỗi phụ đề...", "info")
+                if not run_auto_qa_repair:
+                    self.finished_signal.emit(False, "Modul 'auto_qa_repair' chưa sẵn sàng!")
+                    return
+
+                root_downloads = os.path.abspath(self.output_dir)
+                report_dir = os.path.join(root_downloads, "report")
+                if not os.path.exists(report_dir):
+                    report_dir = root_downloads
+
+                prompt_file = "./user_data/prompts/promptRepair.md"
+                if not os.path.exists(prompt_file):
+                    prompt_file = "./user_data/prompts/promptQA.md"
+                if not os.path.exists(prompt_file):
+                    prompt_file = "./prompts/promptRepair.md"
+
+                self.progress_signal.emit(10, "Đang khởi động Gemini AI và nạp báo cáo vá lỗi...")
+                run_auto_qa_repair(
+                    prompt_file=prompt_file,
+                    report_folder=report_dir,
+                    original_srt_folder=root_downloads,
+                    fixed_srt_folder=root_downloads,
+                    profile_folder="chrome_data_1",
+                    wait_time=300,
+                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                )
+                self.progress_signal.emit(100, "Hoàn tất vá lỗi QA 100%! 🎉")
+                self.finished_signal.emit(True, f"🎉 Đã sửa xong phụ đề SRT! File phụ đề được cập nhật trực tiếp tại: {root_downloads}")
+                return
+
             # ── CHẾ ĐỘ 1: DỊCH FILE PHỤ ĐỀ SRT CHỌN TỪ BÊN NGOÀI ──
             if self.srt_translate_path and os.path.exists(self.srt_translate_path):
                 self.log_signal.emit(f"🌐 Khởi chạy tiến trình Dịch Phụ Đề SRT sang Tiếng Việt cho: {self.srt_translate_path}", "info")
@@ -425,6 +500,18 @@ class MainWindowV2(QMainWindow):
         self.btn_translate_srt.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_translate_srt.clicked.connect(self.on_select_srt_for_translation)
 
+        self.btn_qa_scan = QPushButton("🔍 QUÉT LỖI QA")
+        self.btn_qa_scan.setObjectName("BtnPause")
+        self.btn_qa_scan.setToolTip("Chọn tệp phụ đề .srt Tiếng Việt để quét phân tích lỗi CPS, ngắt câu và xuất báo cáo .txt")
+        self.btn_qa_scan.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_scan.clicked.connect(self.on_qa_scan_clicked)
+
+        self.btn_qa_repair = QPushButton("🩺 VÁ LỖI QA (AI)")
+        self.btn_qa_repair.setObjectName("BtnPause")
+        self.btn_qa_repair.setToolTip("Khởi động Gemini AI đọc báo cáo lỗi .txt và tự động vá câu từ, mốc thời gian")
+        self.btn_qa_repair.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_qa_repair.clicked.connect(self.on_qa_repair_clicked)
+
         self.btn_pause = QPushButton("⏸️ TẠM DỪNG")
         self.btn_pause.setObjectName("BtnPause")
         self.btn_pause.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -440,6 +527,8 @@ class MainWindowV2(QMainWindow):
         btn_layout.addWidget(self.btn_run)
         btn_layout.addWidget(self.btn_gen_srt)
         btn_layout.addWidget(self.btn_translate_srt)
+        btn_layout.addWidget(self.btn_qa_scan)
+        btn_layout.addWidget(self.btn_qa_repair)
         btn_layout.addWidget(self.btn_pause)
         btn_layout.addWidget(self.btn_stop)
         btn_layout.addStretch()
@@ -814,6 +903,90 @@ class MainWindowV2(QMainWindow):
         self.worker.finished_signal.connect(self.on_process_finished)
         self.worker.start()
 
+    def on_qa_scan_clicked(self):
+        """Xử lý sự kiện bấm nút QUÉT LỖI QA: Hỗ trợ chọn 1 Tệp lẻ hoặc Cả Thư Mục"""
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Lựa Chọn Phạm Vi Quét QA")
+        msg_box.setText("Bạn muốn quét phân tích lỗi QA cho 1 Tệp đơn lẻ hay Cả Thư Mục?")
+        btn_file = msg_box.addButton("📄 Chọn 1 Tệp SRT", QMessageBox.ButtonRole.ActionRole)
+        btn_folder = msg_box.addButton("📁 Chọn Cả Thư Mục SRT", QMessageBox.ButtonRole.ActionRole)
+        btn_cancel = msg_box.addButton("Hủy", QMessageBox.ButtonRole.RejectRole)
+        msg_box.exec()
+
+        target_path = None
+        if msg_box.clickedButton() == btn_file:
+            target_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Chọn Tệp SRT Tiếng Việt để Quét Lỗi QA",
+                self.txt_output_dir.text().strip() or "./downloads",
+                "Subtitle Files (*.srt);;All Files (*)"
+            )
+        elif msg_box.clickedButton() == btn_folder:
+            target_path = QFileDialog.getExistingDirectory(
+                self,
+                "Chọn Thư Mục Chứa Các Tệp SRT Tiếng Việt để Quét Hàng Loạt",
+                self.txt_output_dir.text().strip() or "./downloads"
+            )
+
+        if not target_path:
+            return
+
+        out_dir = self.txt_output_dir.text().strip() or "./downloads"
+        self.progress_bar.setValue(0)
+
+        self.btn_run.setEnabled(False)
+        self.btn_gen_srt.setEnabled(False)
+        self.btn_translate_srt.setEnabled(False)
+        self.btn_qa_scan.setEnabled(False)
+        self.btn_qa_repair.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self.btn_stop.setEnabled(True)
+
+        self.update_kpi_value("kpi_percent", "0%", "#10b981")
+        self.update_kpi_value("kpi_status", "Quét QA 🔍", "#6366f1")
+        self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
+        
+        self.lbl_system_badge.setText("🔍 QUÉT QA")
+        self.lbl_system_badge.setStyleSheet("background-color: #0284c7; color: white;")
+
+        self.start_timestamp = time.time()
+        self.timer.start()
+
+        self.worker = ProcessWorker(link="", output_dir=out_dir, qa_scan_path=target_path)
+        self.worker.log_signal.connect(self.append_log)
+        self.worker.progress_signal.connect(self.update_progress)
+        self.worker.finished_signal.connect(self.on_process_finished)
+        self.worker.start()
+
+    def on_qa_repair_clicked(self):
+        """Xử lý sự kiện bấm nút VÁ LỖI QA (AI)"""
+        out_dir = self.txt_output_dir.text().strip() or "./downloads"
+        self.progress_bar.setValue(0)
+
+        self.btn_run.setEnabled(False)
+        self.btn_gen_srt.setEnabled(False)
+        self.btn_translate_srt.setEnabled(False)
+        self.btn_qa_scan.setEnabled(False)
+        self.btn_qa_repair.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self.btn_stop.setEnabled(True)
+
+        self.update_kpi_value("kpi_percent", "0%", "#10b981")
+        self.update_kpi_value("kpi_status", "Vá QA 🩺", "#6366f1")
+        self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
+        
+        self.lbl_system_badge.setText("🩺 VÁ LỖI QA")
+        self.lbl_system_badge.setStyleSheet("background-color: #9333ea; color: white;")
+
+        self.start_timestamp = time.time()
+        self.timer.start()
+
+        self.worker = ProcessWorker(link="", output_dir=out_dir, qa_repair_mode=True)
+        self.worker.log_signal.connect(self.append_log)
+        self.worker.progress_signal.connect(self.update_progress)
+        self.worker.finished_signal.connect(self.on_process_finished)
+        self.worker.start()
+
     def on_pause_clicked(self):
         if not self.worker or not self.worker.isRunning():
             return
@@ -861,6 +1034,8 @@ class MainWindowV2(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_gen_srt.setEnabled(True)
         self.btn_translate_srt.setEnabled(True)
+        self.btn_qa_scan.setEnabled(True)
+        self.btn_qa_repair.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.txt_link.setEnabled(True)
