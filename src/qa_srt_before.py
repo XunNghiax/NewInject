@@ -193,9 +193,8 @@ def analyze_single_srt(file_path, log_callback=print, scan_mode='all'):
 
             has_valid_ending = bool(VALID_ENDING_PATTERN.search(text_stripped))
 
-            # Signal 1 (MẠNH NHẤT): Kết thúc bằng liên từ/giới từ/trợ từ
-            # → câu chắc chắn chưa kết thúc, không cần nhìn block tiếp theo
-            if INCOMPLETE_ENDING_PATTERN.search(text_stripped):
+            # Signal 1 (MẠNH NHẤT): Kết thúc bằng liên từ/giới từ/trợ từ khi KHÔNG có dấu câu kết thúc
+            if not has_valid_ending and INCOMPLETE_ENDING_PATTERN.search(text_stripped):
                 errors.append(
                     "CRITICAL: Block kết thúc bằng liên từ/giới từ/trợ từ "
                     "— câu chưa hoàn chỉnh về ngữ pháp, cần gộp với block tiếp theo"
@@ -214,21 +213,22 @@ def analyze_single_srt(file_path, log_callback=print, scan_mode='all'):
                         "bằng chữ thường, TTS sẽ bị vỡ ngữ điệu"
                     )
 
-                # Signal 2b: Block tiếp theo bắt đầu bằng chữ hoa ngắn
-                # → có thể là tên riêng ngay sau ngắt câu lưng chừng
+                # Signal 2b: Block tiếp theo bắt đầu bằng từ hoa ngắn thực sự nghi ngờ là tên riêng
                 elif next_1st_char.isupper():
                     next_first_word = next_text.split()[0] if next_text.split() else ''
-                    # Từ hoa ngắn (≤4 ký tự) trong tiếng Việt thường là tên riêng
-                    # Kết hợp thêm: block hiện tại cũng có duration ngắn
-                    if len(next_first_word) <= 4 and dur < 1.5:
+                    COMMON_START_WORDS = {
+                        'Anh', 'Tôi', 'Nó', 'Cô', 'Khi', 'Một', 'Em', 'Cậu', 'Ta', 'Hắn',
+                        'Bà', 'Ông', 'Mẹ', 'Bố', 'Chị', 'Chú', 'Bác', 'Nếu', 'Tuy', 'Dù',
+                        'Sao', 'Vậy', 'Này', 'Nào', 'Làm', 'Đi', 'Đã', 'Sẽ', 'Đang'
+                    }
+                    if len(next_first_word) <= 4 and next_first_word not in COMMON_START_WORDS and dur < 0.8:
                         errors.append(
                             "WARNING: Có thể ngắt câu trước tên riêng — block tiếp theo "
                             "bắt đầu bằng từ viết hoa ngắn, block hiện tại không có dấu câu"
                         )
-                    # Duration rất ngắn dù không có dấu câu → block bị cắt sớm
-                    elif dur < 1.0:
+                    elif dur < 0.5:
                         errors.append(
-                            "WARNING: Block quá ngắn và không có dấu câu kết thúc "
+                            "WARNING: Block quá ngắn (< 0.5s) và không có dấu câu kết thúc "
                             "— có thể là ngắt câu sai"
                         )
 
@@ -246,7 +246,7 @@ def analyze_single_srt(file_path, log_callback=print, scan_mode='all'):
             if dur <= 0:
                 errors.append("CRITICAL: Duration <= 0 — sẽ gây crash hệ thống")
                 dur = 0.001
-            elif dur < 0.5:
+            elif dur < 0.5 and not has_valid_ending:
                 errors.append(f"WARNING: Duration quá ngắn ({dur}s) — TTS có thể không kịp render")
 
             cps = block['cps']
@@ -259,20 +259,6 @@ def analyze_single_srt(file_path, log_callback=print, scan_mode='all'):
                 errors.append(
                     f"WARNING: CPS = {cps} (ngưỡng {CPS_CONSECUTIVE_WARN}) "
                     f"— cần rút ngắn nội dung"
-                )
-            # elif cps > CPS_MID:
-            #     errors.append(
-            #         f"WARNING NHẸ: CPS = {cps} (ngưỡng {CPS_MID}) "
-            #         f"— Repair Engine nên cân nhắc rút ngắn"
-            #     )
-
-            # [FIX] Bỏ word_count check — trùng vai trò với CPS, chỉ tạo noise
-            # Duration thực tế so với syllable count (sanity check)
-            expected_min = block['syllable_count'] * 0.15  # 150ms/âm tiết tối thiểu
-            if dur < expected_min * 0.7 and dur > 0:
-                errors.append(
-                    f"WARNING: Duration ({dur:.2f}s) quá ngắn so với "
-                    f"{block['syllable_count']} âm tiết — timestamp có thể bị lỗi"
                 )
 
         # ── ĐÓNG GÓI LỖI ─────────────────────────────────
@@ -334,6 +320,13 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
         
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
+            # Dọn dẹp các file report cũ trước khi lưu báo cáo mới
+            for old_f in os.listdir(out_dir):
+                if (old_f.lower().startswith('report_') or old_f.lower().startswith(f"{folder_name.lower()}_")) and old_f.lower().endswith('.txt'):
+                    try:
+                        os.remove(os.path.join(out_dir, old_f))
+                    except Exception:
+                        pass
 
         _, ext = os.path.splitext(output_filename)
         if not ext: ext = ".txt" # Đảm bảo luôn có đuôi file
@@ -398,16 +391,22 @@ def analyze_srt_to_file(in_path, out_path, errors_per_file=80,
     elif scan_mode == 'cps':    mode_display = "CHỈ LỖI TỐC ĐỘ CPS"
     else:                       mode_display = "TOÀN DIỆN"
 
+    def natural_sort_key(s):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
     if os.path.isfile(in_path):
         log_callback(f"📄 CHẾ ĐỘ: Quét {mode_display} — 1 file đơn lẻ...\n")
         files_to_process = [in_path]
     elif os.path.isdir(in_path):
         log_callback(f"📁 CHẾ ĐỘ: Quét {mode_display} — hàng loạt thư mục...\n")
-        files_to_process = sorted([
-            os.path.join(in_path, f)
-            for f in os.listdir(in_path)
-            if f.lower().endswith('.srt')
-        ])
+        files_to_process = sorted(
+            [
+                os.path.join(in_path, f)
+                for f in os.listdir(in_path)
+                if f.lower().endswith('.srt')
+            ],
+            key=lambda x: natural_sort_key(os.path.basename(x))
+        )
         if not files_to_process:
             log_callback(f"⚠️ Không tìm thấy file .srt nào trong thư mục: {in_path}")
             return
@@ -429,3 +428,4 @@ def analyze_srt_to_file(in_path, out_path, errors_per_file=80,
         errors_per_file, log_callback, scan_mode
     )
     log_callback(f"📁 Thư mục lưu báo cáo: {os.path.dirname(os.path.abspath(out_path))}")
+    return len(all_error_clusters), total_crit_all, total_warn_all

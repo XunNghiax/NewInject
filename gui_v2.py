@@ -40,6 +40,14 @@ try:
 except ImportError:
     run_auto_qa_repair = None
 
+try:
+    from srt_utils import process_and_renumber_srt, merge_numbered_srt_files, process_srt_speed, split_srt_file
+except ImportError:
+    process_and_renumber_srt = None
+    merge_numbered_srt_files = None
+    process_srt_speed = None
+    split_srt_file = None
+
 
 # ==============================================================================
 # WORKER THREAD ĐỒNG BỘ: HỖ TRỢ TẢI REAL-TIME BILIBILI & GIẢ LẬP
@@ -114,204 +122,195 @@ class ProcessWorker(QThread):
 
     def run(self):
         try:
-            # ── CHẾ ĐỘ QUÉT LỖI QA THỦ CÔNG (QA SCAN) ──
-            if self.qa_scan_path and os.path.exists(self.qa_scan_path):
-                self.log_signal.emit(f"🔍 Khởi chạy tiến trình Quét Lỗi QA Phụ Đề cho: {self.qa_scan_path}", "info")
-                if not analyze_srt_to_file:
-                    self.finished_signal.emit(False, "Modul 'qa_srt_before' chưa sẵn sàng!")
-                    return
+            root_downloads = os.path.abspath(self.output_dir)
+            os.makedirs(root_downloads, exist_ok=True)
 
-                # Xác định thư mục root 'downloads' để tạo thư mục 'report' CÙNG CẤP với các thư mục srt khác
-                root_downloads = os.path.abspath(self.output_dir)
-                report_dir = os.path.join(root_downloads, "report")
-                os.makedirs(report_dir, exist_ok=True)
+            self.emit_progress(5, "⚡ Khởi động Dự Án Tự Động...")
+            self.emit_log("==================================================", "info")
+            self.emit_log("🚀 BẮT ĐẦU QUY TRÌNH XỬ LÝ DỰ ÁN TỰ ĐỘNG (END-TO-END)", "info")
+            self.emit_log("==================================================", "info")
 
-                if os.path.isfile(self.qa_scan_path):
-                    raw_name = os.path.splitext(os.path.basename(self.qa_scan_path))[0]
-                else:
-                    raw_name = os.path.basename(os.path.abspath(self.qa_scan_path).rstrip("/\\"))
+            # ── BƯỚC 1: KIỂM TRA THƯ MỤC & TẢI VIDEO ──
+            video_file = None
+            for f in os.listdir(root_downloads):
+                if f.lower().endswith(('.mp4', '.mkv', '.flv', '.webm')) and not f.endswith('.part'):
+                    video_file = os.path.join(root_downloads, f)
+                    break
 
-                out_path = os.path.join(report_dir, f"Report_{raw_name}.txt")
-
-                self.progress_signal.emit(20, "Đang quét phân tích lỗi CPS & ngữ pháp phụ đề...")
-                analyze_srt_to_file(
-                    in_path=self.qa_scan_path,
-                    out_path=out_path,
-                    errors_per_file=80,
-                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                    scan_mode='all'
-                )
-                self.progress_signal.emit(100, "Hoàn tất quét lỗi QA 100%! 🎉")
-                self.finished_signal.emit(True, f"🎉 Đã quét lỗi xong! Các file báo cáo lưu tại thư mục 'report' (cùng cấp trong downloads): {report_dir}")
-                return
-
-            # ── CHẾ ĐỘ GỬI GEMINI AI VÁ LỖI QA THỦ CÔNG (QA REPAIR) ──
-            if self.qa_repair_mode:
-                self.log_signal.emit("🩺 Khởi chạy Gemini AI đọc báo cáo và tự động vá lỗi phụ đề...", "info")
-                if not run_auto_qa_repair:
-                    self.finished_signal.emit(False, "Modul 'auto_qa_repair' chưa sẵn sàng!")
-                    return
-
-                root_downloads = os.path.abspath(self.output_dir)
-                report_dir = os.path.join(root_downloads, "report")
-                if not os.path.exists(report_dir):
-                    report_dir = root_downloads
-
-                prompt_file = "./user_data/prompts/promptRepair.md"
-                if not os.path.exists(prompt_file):
-                    prompt_file = "./user_data/prompts/promptQA.md"
-                if not os.path.exists(prompt_file):
-                    prompt_file = "./prompts/promptRepair.md"
-
-                self.progress_signal.emit(10, "Đang khởi động Gemini AI và nạp báo cáo vá lỗi...")
-                run_auto_qa_repair(
-                    prompt_file=prompt_file,
-                    report_folder=report_dir,
-                    original_srt_folder=root_downloads,
-                    fixed_srt_folder=root_downloads,
-                    profile_folder="chrome_data_1",
-                    wait_time=300,
-                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                )
-                self.progress_signal.emit(100, "Hoàn tất vá lỗi QA 100%! 🎉")
-                self.finished_signal.emit(True, f"🎉 Đã sửa xong phụ đề SRT! File phụ đề được cập nhật trực tiếp tại: {root_downloads}")
-                return
-
-            # ── CHẾ ĐỘ 1: DỊCH FILE PHỤ ĐỀ SRT CHỌN TỪ BÊN NGOÀI ──
-            if self.srt_translate_path and os.path.exists(self.srt_translate_path):
-                self.log_signal.emit(f"🌐 Khởi chạy tiến trình Dịch Phụ Đề SRT sang Tiếng Việt cho: {self.srt_translate_path}", "info")
-                if not run_auto_translate_srt:
-                    self.finished_signal.emit(False, "Modul dịch thuật 'gemini_translate' chưa sẵn sàng!")
-                    return
-
-                src_dir = os.path.dirname(os.path.abspath(self.srt_translate_path))
-                out_dir = self.output_dir
-
-                prompt_file = "./user_data/prompts/promptTranslates.md"
-                if not os.path.exists(prompt_file):
-                    prompt_file = "./prompts/promptTranslates.md"
-                if not os.path.exists(prompt_file):
-                    prompt_file = "./prompts/translate.txt"
-
-                self.progress_signal.emit(10, "Đang khởi động Gemini AI Biên Dịch Phim...")
-                run_auto_translate_srt(
-                    prompt_file=prompt_file,
-                    cn_folder=src_dir,
-                    vi_folder=out_dir,
-                    wait_time=300,
-                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                    check_pause_callback=self.check_pause
-                )
-                self.progress_signal.emit(100, "Hoàn tất dịch 100%! 🎉")
-                self.finished_signal.emit(True, f"🎉 Đã dịch xong phụ đề SRT sang Tiếng Việt!")
-                return
-
-            # ── CHẾ ĐỘ 2: XỬ LÝ NHẬN DIỆN GIỌNG NÓI TỪ FILE LOCAL ──
-            if self.local_media_path and os.path.exists(self.local_media_path):
-                self.log_signal.emit(f"🎙️ Khởi tạo tiến trình tạo phụ đề cho file: {self.local_media_path}", "info")
-                if not SubtitleGenerator:
-                    self.finished_signal.emit(False, "Chưa cài đặt thư viện 'faster-whisper'!")
-                    return
-
-                self.srt_generator = SubtitleGenerator(
-                    output_dir=self.output_dir,
-                    log_callback=self.emit_log,
-                    progress_callback=self.emit_progress
-                )
-                res = self.srt_generator.generate_srt(self.local_media_path, model_size="base")
-                if res.get("success"):
-                    srt_file = res.get("srt_path")
-                    if self.auto_translate_srt and srt_file and os.path.exists(srt_file) and run_auto_translate_srt:
-                        self.log_signal.emit("🌐 Khởi chạy Gemini AI dịch phụ đề vừa tạo sang Tiếng Việt...", "info")
-                        prompt_file = "./user_data/prompts/promptTranslates.md"
-                        if not os.path.exists(prompt_file):
-                            prompt_file = "./prompts/promptTranslates.md"
-                        if not os.path.exists(prompt_file):
-                            prompt_file = "./prompts/translate.txt"
-                        src_dir = os.path.dirname(os.path.abspath(srt_file))
-                        run_auto_translate_srt(
-                            prompt_file=prompt_file,
-                            cn_folder=src_dir,
-                            vi_folder=self.output_dir,
-                            wait_time=300,
-                            log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                            check_pause_callback=self.check_pause
-                        )
-                        self.finished_signal.emit(True, f"🎉 Đã tạo & dịch xong phụ đề SRT sang Tiếng Việt cho file local!")
-                    else:
-                        self.finished_signal.emit(True, f"🎉 Đã xuất file phụ đề SRT thành công: {os.path.basename(srt_file)}")
-                else:
-                    self.finished_signal.emit(False, res.get("error", "Lỗi tạo phụ đề"))
-                return
-
-            # ── CHẾ ĐỘ 3: TẢI VIDEO BILIBILI (+ TỰ ĐỘNG TẠO SRT + DỊCH SANG TIẾNG VIỆT NẾU BẬT) ──
-            is_bilibili = BilibiliDownloader and BilibiliDownloader.is_valid_bilibili_url(self.link)
-
-            if is_bilibili:
-                self.log_signal.emit("📌 Phát hiện liên kết Bilibili! Khởi động modul BilibiliDownloader...", "info")
+            if not video_file and self.link and BilibiliDownloader and BilibiliDownloader.is_valid_bilibili_url(self.link):
+                self.emit_log(f"📥 Thư mục trống. Khởi động tải Video từ Bilibili: {self.link}...", "info")
+                self.emit_progress(10, "Đang tải Video Bilibili...")
                 self.downloader = BilibiliDownloader(
-                    output_dir=self.output_dir,
+                    output_dir=root_downloads,
                     log_callback=self.emit_log,
                     progress_callback=self.emit_progress
                 )
                 res = self.downloader.download(self.link)
-
                 if res.get("success"):
                     video_file = res.get("file_path")
-                    if self.auto_gen_srt and video_file and os.path.exists(video_file) and SubtitleGenerator:
-                        self.log_signal.emit("🎙️ Kích hoạt tính năng Tự Động Tạo Phụ Đề SRT bằng Faster-Whisper AI...", "info")
-                        self.srt_generator = SubtitleGenerator(
-                            output_dir=self.output_dir,
-                            log_callback=self.emit_log,
-                            progress_callback=self.emit_progress
-                        )
-                        srt_res = self.srt_generator.generate_srt(video_file, model_size="base")
-                        srt_file = srt_res.get("srt_path") if srt_res.get("success") else None
-
-                        if self.auto_translate_srt and srt_file and os.path.exists(srt_file) and run_auto_translate_srt:
-                            self.log_signal.emit("🌐 Kích hoạt Gemini AI dịch phụ đề vừa tạo sang Tiếng Việt...", "info")
-                            prompt_file = "./user_data/prompts/promptTranslates.md"
-                            if not os.path.exists(prompt_file):
-                                prompt_file = "./prompts/promptTranslates.md"
-                            if not os.path.exists(prompt_file):
-                                prompt_file = "./prompts/translate.txt"
-                            src_dir = os.path.dirname(os.path.abspath(srt_file))
-                            run_auto_translate_srt(
-                                prompt_file=prompt_file,
-                                cn_folder=src_dir,
-                                vi_folder=self.output_dir,
-                                wait_time=300,
-                                log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                                check_pause_callback=self.check_pause
-                            )
-                            self.finished_signal.emit(True, f"🎉 Đã Tải Video ➔ Tạo Phụ Đề ➔ Dịch Tiếng Việt thành công cho: {res.get('title', '')}")
-                        else:
-                            self.finished_signal.emit(True, f"🎉 Đã tải video & tạo phụ đề SRT thành công: {res.get('title', '')}")
-                    else:
-                        self.finished_signal.emit(True, f"Đã tải xong video: {res.get('title', '')}")
                 else:
-                    self.finished_signal.emit(False, res.get("error", "Lỗi tải video"))
+                    self.finished_signal.emit(False, res.get("error", "Lỗi tải video Bilibili"))
+                    return
+
+            if video_file:
+                raw_title = os.path.splitext(os.path.basename(video_file))[0]
+                self.emit_log(f"📹 Tệp Video dự án: {os.path.basename(video_file)}", "info")
             else:
-                self.log_signal.emit(f"🚀 Khởi tạo tiến trình xử lý cho link: {self.link}", "info")
-                total_steps = 100
-                for step in range(1, total_steps + 1):
-                    self.mutex.lock()
-                    while self._is_paused:
-                        self.pause_condition.wait(self.mutex)
-                    if self._is_stopped:
-                        self.mutex.unlock()
-                        self.finished_signal.emit(False, "Tiến trình đã bị người dùng hủy bỏ!")
-                        return
-                    self.mutex.unlock()
+                raw_title = "DuAn_Auto"
 
-                    time.sleep(0.06)
-                    status_msg = f"Đang xử lý dữ liệu... [{step}/{total_steps}]"
-                    self.progress_signal.emit(step, status_msg)
+            cn_folder = os.path.join(root_downloads, f"temp_split_cn_{raw_title}")
+            vi_folder = os.path.join(root_downloads, f"temp_split_vi_{raw_title}")
 
-                    if step % 20 == 0 or step == 1:
-                        self.log_signal.emit(f"✓ Hoàn thành {step}%: {status_msg}", "info")
+            # ── BƯỚC 2: KIỂM TRA THƯ MỤC SRT TRUNG QUỐC (temp_split_cn_) ──
+            has_cn_splits = os.path.exists(cn_folder) and any(f.endswith('.srt') for f in os.listdir(cn_folder))
 
-                self.finished_signal.emit(True, "🎉 Tiến trình đã hoàn thành 100%!")
+            if not has_cn_splits:
+                self.emit_log(f"🎙️ Chưa có thư mục SRT Trung Quốc. Tiến hành tạo & xử lý phụ đề gốc...", "info")
+                raw_srt = None
+                for f in os.listdir(root_downloads):
+                    if f.lower().endswith('.srt') and not f.endswith('_vi.srt') and not f.endswith('_08.srt') and not f.endswith('_speed08.srt'):
+                        raw_srt = os.path.join(root_downloads, f)
+                        break
+
+                if not raw_srt and video_file and SubtitleGenerator:
+                    self.emit_progress(25, "Đang nhận diện giọng nói tạo phụ đề SRT...")
+                    self.srt_generator = SubtitleGenerator(
+                        output_dir=root_downloads,
+                        log_callback=self.emit_log,
+                        progress_callback=self.emit_progress
+                    )
+                    srt_res = self.srt_generator.generate_srt(video_file, model_size="base")
+                    if srt_res.get("success"):
+                        raw_srt = srt_res.get("srt_path")
+
+                if not raw_srt:
+                    self.finished_signal.emit(False, "❌ Không thể tạo hoặc tìm thấy file phụ đề SRT gốc!")
+                    return
+
+                # 2b: Chuyển đổi tốc độ từ 1.0 sang 0.8 (CHỈ 1 LẦN DUY NHẤT từ file SRT gốc)
+                srt_08 = os.path.join(root_downloads, f"{raw_title}_speed08.srt")
+                if not os.path.exists(srt_08):
+                    self.emit_log("⚡ Đang tự động chuyển đổi tốc độ phụ đề SRT gốc từ 1.0x sang 0.8x (Chỉ thực hiện 1 lần duy nhất)...", "info")
+                    if process_srt_speed:
+                        process_srt_speed(raw_srt, srt_08, 1.0, 0.8, log_callback=lambda msg: self.emit_log(msg, "info"))
+                    else:
+                        srt_08 = raw_srt
+
+                # 2c: Lấy tệp SRT 0.8x vừa tạo chia nhỏ thành 100 block/file lưu vào thư mục cn
+                self.emit_log(f"📁 Đang chia nhỏ tệp SRT 0.8x thành 100 block/file lưu vào thư mục Trung Quốc: {cn_folder}...", "info")
+                os.makedirs(cn_folder, exist_ok=True)
+                if split_srt_file:
+                    prefix_path = os.path.join(cn_folder, "part")
+                    split_srt_file(srt_08, output_prefix=prefix_path, blocks_per_file=100, log_callback=lambda msg: self.emit_log(msg, "info"))
+            else:
+                self.emit_log(f"✅ Đã tìm thấy thư mục phụ đề Trung Quốc: {cn_folder}", "info")
+
+            # ── BƯỚC 3: DỊCH THUẬT CN -> VI (temp_split_vi_) ──
+            self.emit_progress(40, "Đang kiểm tra & chạy Gemini AI dịch Tiếng Việt...")
+            os.makedirs(vi_folder, exist_ok=True)
+
+            cn_splits = [f for f in os.listdir(cn_folder) if f.endswith('.srt')] if os.path.exists(cn_folder) else []
+            vi_splits = [f for f in os.listdir(vi_folder) if f.endswith('.srt')] if os.path.exists(vi_folder) else []
+
+            def check_split_translated(cf_name):
+                raw_bname = os.path.splitext(cf_name)[0]
+                cand1 = os.path.join(vi_folder, cf_name)
+                cand2 = os.path.join(vi_folder, f"{raw_bname}_vi.srt")
+                return (os.path.exists(cand1) and os.path.getsize(cand1) > 50) or (os.path.exists(cand2) and os.path.getsize(cand2) > 50)
+
+            is_all_vi_translated = (
+                len(cn_splits) > 0 and
+                len(vi_splits) >= len(cn_splits) and
+                all(check_split_translated(cf) for cf in cn_splits)
+            )
+
+            if is_all_vi_translated:
+                self.emit_log(f"⏩ [CHECKPOINT] Đã tìm thấy đầy đủ {len(vi_splits)} phân đoạn Tiếng Việt hoàn chỉnh tại: {vi_folder}. BỎ QUA BƯỚC DỊCH THUẬT, CHUYỂN SANG BƯỚC TỐI ƯU QA!", "success")
+            else:
+                self.emit_log(f"🌐 Đang dịch các phân đoạn từ '{cn_folder}' sang Tiếng Việt lưu tại '{vi_folder}'...", "info")
+                prompt_trans = "./user_data/prompts/promptTranslates.md"
+                if not os.path.exists(prompt_trans):
+                    prompt_trans = "./prompts/promptTranslates.md"
+
+                if run_auto_translate_srt:
+                    run_auto_translate_srt(
+                        prompt_file=prompt_trans,
+                        cn_folder=cn_folder,
+                        vi_folder=vi_folder,
+                        target_speed=1.0,
+                        wait_time=300,
+                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                        check_pause_callback=self.check_pause
+                    )
+
+            # ── BƯỚC 4: VÁ LỖI QA & KIỂM TRA LẠI (QA REPAIR & RE-CHECK) ──
+            self.emit_progress(70, "Đang chạy vòng lặp kiểm tra & vá lỗi QA...")
+            report_dir = os.path.join(root_downloads, "report")
+            os.makedirs(report_dir, exist_ok=True)
+
+            prompt_repair = "./user_data/prompts/promptRepair.md"
+            if not os.path.exists(prompt_repair):
+                prompt_repair = "./prompts/promptRepair.md"
+
+            MAX_PASSES = 5
+            pass_num = 1
+
+            while pass_num <= MAX_PASSES:
+                self.check_pause()
+                self.emit_log(f"\n🔄 ===== BẮT ĐẦU VÒNG VÁ LỖI QA THỨ {pass_num}/{MAX_PASSES} =====", "info")
+                
+                if run_auto_qa_repair:
+                    run_auto_qa_repair(
+                        prompt_file=prompt_repair,
+                        report_folder=report_dir,
+                        original_srt_folder=vi_folder,
+                        fixed_srt_folder=vi_folder,
+                        profile_folder="chrome_data_1",
+                        wait_time=300,
+                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                    )
+
+                if process_and_renumber_srt:
+                    process_and_renumber_srt(vi_folder, vi_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+
+                recheck_out = os.path.join(report_dir, f"Report_ReCheck_Pass_{pass_num}.txt")
+                total_err, total_crit, total_warn = 0, 0, 0
+
+                if analyze_srt_to_file:
+                    res = analyze_srt_to_file(
+                        in_path=vi_folder,
+                        out_path=recheck_out,
+                        errors_per_file=80,
+                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                        scan_mode='all'
+                    )
+                    if res:
+                        total_err, total_crit, total_warn = res
+
+                if total_crit == 0:
+                    self.emit_log(f"🎉 THÀNH CÔNG RỰC RỠ! Không còn lỗi CRITICAL nào sau {pass_num} vòng vá!", "success")
+                    break
+                else:
+                    if pass_num < MAX_PASSES:
+                        self.emit_log(f"⚠️ Vẫn còn {total_crit} lỗi CRITICAL. Tiếp tục vòng vá {pass_num + 1}/{MAX_PASSES}...", "warning")
+                        pass_num += 1
+                    else:
+                        self.emit_log(f"🛑 Đã đạt {MAX_PASSES} vòng vá tối đa. Còn {total_crit} lỗi CRITICAL.", "warning")
+                        break
+
+            # ── BƯỚC 5: GỘP FILE THÀNH PHẨM (MERGE FINAL SRT) ──
+            self.emit_progress(95, "Đang gộp toàn bộ phân đoạn thành 1 file phụ đề duy nhất...")
+            final_srt_path = os.path.join(root_downloads, f"{raw_title}_vi.srt")
+
+            if merge_numbered_srt_files:
+                merge_numbered_srt_files(vi_folder, final_srt_path, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+
+            self.emit_progress(100, "HOÀN TẤT TOÀN BỘ DỰ ÁN! 🎉")
+            self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 File phụ đề thành phẩm lưu tại:\n{final_srt_path}")
+
+        except Exception as e:
+            self.emit_log(f"❌ Lỗi tiến trình tự động: {e}", "error")
+            self.finished_signal.emit(False, str(e))
 
         except Exception as e:
             self.log_signal.emit(f"❌ Lỗi ngoài dự kiến: {str(e)}", "error")
@@ -329,18 +328,13 @@ class MainWindowV2(QMainWindow):
         self.start_timestamp = None
         self.logs_history = []
         
-        # Debounce Timer tự động phát hiện dán Bilibili URL để tự tải
-        self.auto_start_timer = QTimer(self)
-        self.auto_start_timer.setSingleShot(True)
-        self.auto_start_timer.setInterval(400)
-        self.auto_start_timer.timeout.connect(self.check_and_auto_start)
-
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.update_timer_display)
 
         self.init_ui()
         self.setup_shortcuts()
+        self.load_user_config()
 
     def init_ui(self):
         self.setWindowTitle("Trình Tải Video Bilibili Tốc Độ Cao - GUI V2 PRO 🚀")
@@ -416,15 +410,14 @@ class MainWindowV2(QMainWindow):
         self.txt_link = QLineEdit()
         self.txt_link.setObjectName("LinkInput")
         self.txt_link.setPlaceholderText("Dán liên kết Bilibili (https://www.bilibili.com/video/BV...) vào đây...")
-        self.txt_link.setToolTip("Khi dán link Bilibili hợp lệ, hệ thống sẽ TỰ ĐỘNG khởi chạy tiến trình tải ngay!")
-        self.txt_link.textChanged.connect(self.on_link_text_changed)
+        self.txt_link.setToolTip("Nhập hoặc dán link Bilibili (Nhấn nút BẮT ĐẦU DỰ ÁN TỰ ĐỘNG để chạy)")
 
         self.btn_paste_link = QToolButton()
-        self.btn_paste_link.setText("📋 Dán & Tải Ngay")
+        self.btn_paste_link.setText("📋 Dán Link")
         self.btn_paste_link.setObjectName("ToolBtnAccent")
-        self.btn_paste_link.setToolTip("Dán nhanh nội dung từ Clipboard và TỰ ĐỘNG TẢI NGAY")
+        self.btn_paste_link.setToolTip("Dán nhanh đường dẫn video Bilibili từ Clipboard")
         self.btn_paste_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_paste_link.clicked.connect(self.paste_and_auto_run)
+        self.btn_paste_link.clicked.connect(self.paste_link_only)
 
         self.btn_clear_link = QToolButton()
         self.btn_clear_link.setText("❌ Xóa")
@@ -438,7 +431,7 @@ class MainWindowV2(QMainWindow):
         link_box_layout.addWidget(self.btn_clear_link)
         input_layout.addLayout(link_box_layout)
 
-        # Dòng Tùy Chọn Thư Mục Lưu & Autostart
+        # Dòng Tùy Chọn Thư Mục Lưu
         opt_layout = QHBoxLayout()
         opt_layout.setSpacing(12)
 
@@ -447,7 +440,8 @@ class MainWindowV2(QMainWindow):
 
         self.txt_output_dir = QLineEdit("./downloads")
         self.txt_output_dir.setObjectName("DirInput")
-        self.txt_output_dir.setReadOnly(True)
+        self.txt_output_dir.setToolTip("Thư mục lưu trữ dự án video & phụ đề thành phẩm")
+        self.txt_output_dir.editingFinished.connect(self.save_user_config)
 
         self.btn_browse_dir = QToolButton()
         self.btn_browse_dir.setText("📂 Chọn...")
@@ -455,62 +449,20 @@ class MainWindowV2(QMainWindow):
         self.btn_browse_dir.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_browse_dir.clicked.connect(self.browse_output_directory)
 
-        self.chk_auto_download = QCheckBox("⚡ Tự động tải ngay khi dán Link")
-        self.chk_auto_download.setObjectName("AutoScrollCheck")
-        self.chk_auto_download.setChecked(True)
-        self.chk_auto_download.setToolTip("Khi bật tùy chọn này, dán đường dẫn Bilibili sẽ tự động bắt đầu tải mà không cần nhấn nút")
-
-        self.chk_auto_srt = QCheckBox("🎙️ Tự động tạo phụ đề .srt sau khi tải")
-        self.chk_auto_srt.setObjectName("AutoScrollCheck")
-        self.chk_auto_srt.setChecked(False)
-        self.chk_auto_srt.setToolTip("Tự động dùng AI Faster-Whisper chuyển giọng nói trong video vừa tải thành tệp phụ đề .srt chuẩn")
-
-        self.chk_auto_translate = QCheckBox("🌐 Tự động Dịch sang Tiếng Việt (Gemini AI)")
-        self.chk_auto_translate.setObjectName("AutoScrollCheck")
-        self.chk_auto_translate.setChecked(False)
-        self.chk_auto_translate.setToolTip("Tự động dùng Gemini AI kết hợp promptTranslates.md dịch tệp phụ đề .srt vừa tạo sang Tiếng Việt mượt mà")
-
         opt_layout.addWidget(lbl_dir)
         opt_layout.addWidget(self.txt_output_dir, stretch=1)
         opt_layout.addWidget(self.btn_browse_dir)
-        opt_layout.addWidget(self.chk_auto_download)
-        opt_layout.addWidget(self.chk_auto_srt)
-        opt_layout.addWidget(self.chk_auto_translate)
         input_layout.addLayout(opt_layout)
 
-        # Dòng Buttons điều khiển
+        # Dòng Button duy nhất điều khiển dự án tự động
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(12)
 
-        self.btn_run = QPushButton("🚀 TẢI VIDEO NGAY")
+        self.btn_run = QPushButton("🚀 BẮT ĐẦU DỰ ÁN TỰ ĐỘNG")
         self.btn_run.setObjectName("BtnRun")
-        self.btn_run.setToolTip("Bắt đầu tải video Bilibili chất lượng cao nhất (Ctrl+Enter)")
+        self.btn_run.setToolTip("Khởi động toàn bộ dự án: Tải Video -> Tạo SRT -> Đổi Tốc Độ 0.8 -> Chia Block -> Dịch Tiếng Việt -> Vá Lỗi QA -> Gộp Thành Phẩm (Ctrl+Enter)")
         self.btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_run.clicked.connect(self.on_run_clicked)
-
-        self.btn_gen_srt = QPushButton("🎙️ TẠO PHỤ ĐỀ SRT")
-        self.btn_gen_srt.setObjectName("BtnPause")
-        self.btn_gen_srt.setToolTip("Chọn tệp Video hoặc Audio từ máy tính để AI nhận diện giọng nói và xuất tệp .srt")
-        self.btn_gen_srt.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_gen_srt.clicked.connect(self.on_select_file_for_srt)
-
-        self.btn_translate_srt = QPushButton("🌐 DỊCH SRT SANG VIỆT")
-        self.btn_translate_srt.setObjectName("BtnPause")
-        self.btn_translate_srt.setToolTip("Chọn tệp phụ đề .srt Tiếng Trung/Anh từ máy tính để Gemini AI dịch sang Tiếng Việt qua promptTranslates.md")
-        self.btn_translate_srt.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_translate_srt.clicked.connect(self.on_select_srt_for_translation)
-
-        self.btn_qa_scan = QPushButton("🔍 QUÉT LỖI QA")
-        self.btn_qa_scan.setObjectName("BtnPause")
-        self.btn_qa_scan.setToolTip("Chọn tệp phụ đề .srt Tiếng Việt để quét phân tích lỗi CPS, ngắt câu và xuất báo cáo .txt")
-        self.btn_qa_scan.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_qa_scan.clicked.connect(self.on_qa_scan_clicked)
-
-        self.btn_qa_repair = QPushButton("🩺 VÁ LỖI QA (AI)")
-        self.btn_qa_repair.setObjectName("BtnPause")
-        self.btn_qa_repair.setToolTip("Khởi động Gemini AI đọc báo cáo lỗi .txt và tự động vá câu từ, mốc thời gian")
-        self.btn_qa_repair.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_qa_repair.clicked.connect(self.on_qa_repair_clicked)
 
         self.btn_pause = QPushButton("⏸️ TẠM DỪNG")
         self.btn_pause.setObjectName("BtnPause")
@@ -524,14 +476,9 @@ class MainWindowV2(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.on_stop_clicked)
 
-        btn_layout.addWidget(self.btn_run)
-        btn_layout.addWidget(self.btn_gen_srt)
-        btn_layout.addWidget(self.btn_translate_srt)
-        btn_layout.addWidget(self.btn_qa_scan)
-        btn_layout.addWidget(self.btn_qa_repair)
-        btn_layout.addWidget(self.btn_pause)
-        btn_layout.addWidget(self.btn_stop)
-        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_run, stretch=2)
+        btn_layout.addWidget(self.btn_pause, stretch=1)
+        btn_layout.addWidget(self.btn_stop, stretch=1)
 
         input_layout.addLayout(btn_layout)
         top_layout.addWidget(input_group)
@@ -712,50 +659,78 @@ class MainWindowV2(QMainWindow):
             self.lbl_cookie_badge.setText("🍪 COOKIE: CHƯA CÓ")
             self.lbl_cookie_badge.setStyleSheet("background-color: #334155; color: #94a3b8; font-weight: bold;")
 
+    def load_user_config(self):
+        """Đọc cấu hình từ user_config.json để tự động hiển thị link và thư mục lưu gần nhất"""
+        config_path = "./user_data/config/user_config.json"
+        if os.path.exists(config_path):
+            try:
+                import json
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                last_url = cfg.get("last_url", "")
+                last_dir = cfg.get("last_dir", "./downloads")
+                if last_url:
+                    self.txt_link.setText(last_url)
+                if last_dir:
+                    self.txt_output_dir.setText(last_dir)
+                self.append_log(f"⚙️ Đã nạp cấu hình đã lưu: {last_dir}", "info")
+            except Exception as e:
+                pass
+
+    def save_user_config(self):
+        """Lưu đường dẫn link và thư mục dự án vào user_config.json"""
+        os.makedirs("./user_data/config", exist_ok=True)
+        config_path = "./user_data/config/user_config.json"
+        try:
+            import json
+            current_url = self.txt_link.text().strip()
+            current_dir = self.txt_output_dir.text().strip() or "./downloads"
+
+            cfg = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+
+            history_urls = cfg.get("history_urls", [])
+            history_dirs = cfg.get("history_dirs", [])
+
+            if current_url and current_url not in history_urls:
+                history_urls.insert(0, current_url)
+            if current_dir and current_dir not in history_dirs:
+                history_dirs.insert(0, current_dir)
+
+            cfg["last_url"] = current_url
+            cfg["last_dir"] = current_dir
+            cfg["history_urls"] = history_urls[:20]
+            cfg["history_dirs"] = history_dirs[:20]
+
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
     def browse_output_directory(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu video tải về")
         if dir_path:
             self.txt_output_dir.setText(dir_path)
             self.append_log(f"📁 Đã đổi thư mục lưu: {dir_path}", "info")
+            self.save_user_config()
 
-    def on_link_text_changed(self):
-        """Kích hoạt timer kiểm tra khi text thay đổi"""
-        if self.chk_auto_download.isChecked():
-            self.auto_start_timer.start()
-
-    def check_and_auto_start(self):
-        """Nếu phát hiện link Bilibili hợp lệ và worker đang rảnh -> TỰ ĐỘNG CHẠY"""
-        raw_text = self.txt_link.text().strip()
-        if not raw_text:
-            return
-
-        clean_url = BilibiliDownloader.extract_bilibili_url(raw_text) if BilibiliDownloader else None
-        is_running = self.worker and self.worker.isRunning()
-        
-        if not is_running and clean_url:
-            # Tự chuẩn hóa về URL sạch
-            if raw_text != clean_url:
-                self.txt_link.setText(clean_url)
-            self.append_log(f"⚡ Tự động phát hiện liên kết Bilibili hợp lệ: {clean_url}! Khởi động tải ngay...", "info")
-            self.on_run_clicked()
-
-    def paste_and_auto_run(self):
+    def paste_link_only(self):
+        """Chỉ dán link vào ô nhập liệu mà KHÔNG tự động chạy tiến trình"""
         clipboard = QApplication.clipboard()
         raw_text = clipboard.text().strip()
         if not raw_text:
             return
 
         clean_url = BilibiliDownloader.extract_bilibili_url(raw_text) if BilibiliDownloader else None
-        if clean_url:
-            self.txt_link.setText(clean_url)
-            self.append_log(f"📋 Đã trích xuất & dán URL Bilibili: {clean_url}", "info")
-            QTimer.singleShot(100, self.on_run_clicked)
-        else:
-            self.append_log("⚠️ Nội dung trong Bộ nhớ tạm (Clipboard) không chứa liên kết Bilibili hợp lệ!", "warning")
-            QMessageBox.warning(
-                self, "Không Tìm Thấy Link Hợp Lệ",
-                "⚠️ Nội dung vừa dán từ Clipboard không chứa liên kết Bilibili hợp lệ!\n\nVui lòng copy một đường dẫn video Bilibili (ví dụ: https://www.bilibili.com/video/BV...)."
-            )
+        target_url = clean_url if clean_url else raw_text
+        self.txt_link.setText(target_url)
+        self.append_log(f"📋 Đã dán link Bilibili: {target_url}", "info")
+        self.save_user_config()
 
     def update_timer_display(self):
         if self.start_timestamp:
@@ -795,6 +770,9 @@ class MainWindowV2(QMainWindow):
 
         out_dir = self.txt_output_dir.text().strip() or "./downloads"
 
+        # Lưu cấu hình sử dụng gần nhất
+        self.save_user_config()
+
         # Cập nhật UI State
         self.btn_run.setEnabled(False)
         self.btn_pause.setEnabled(True)
@@ -822,9 +800,7 @@ class MainWindowV2(QMainWindow):
         self.timer.start()
 
         # Khởi chạy Worker Thread
-        auto_srt = self.chk_auto_srt.isChecked()
-        auto_trans = self.chk_auto_translate.isChecked()
-        self.worker = ProcessWorker(target_url, output_dir=out_dir, auto_gen_srt=auto_srt, auto_translate_srt=auto_trans)
+        self.worker = ProcessWorker(target_url, output_dir=out_dir)
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.finished_signal.connect(self.on_process_finished)
@@ -844,8 +820,6 @@ class MainWindowV2(QMainWindow):
 
         # Cập nhật UI State
         self.btn_run.setEnabled(False)
-        self.btn_gen_srt.setEnabled(False)
-        self.btn_translate_srt.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
 
@@ -860,8 +834,7 @@ class MainWindowV2(QMainWindow):
         self.start_timestamp = time.time()
         self.timer.start()
 
-        auto_trans = self.chk_auto_translate.isChecked()
-        self.worker = ProcessWorker(link="", output_dir=out_dir, auto_translate_srt=auto_trans, local_media_path=file_path)
+        self.worker = ProcessWorker(link="", output_dir=out_dir, local_media_path=file_path)
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.finished_signal.connect(self.on_process_finished)
@@ -881,8 +854,6 @@ class MainWindowV2(QMainWindow):
 
         # Cập nhật UI State
         self.btn_run.setEnabled(False)
-        self.btn_gen_srt.setEnabled(False)
-        self.btn_translate_srt.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
 
@@ -935,10 +906,6 @@ class MainWindowV2(QMainWindow):
         self.progress_bar.setValue(0)
 
         self.btn_run.setEnabled(False)
-        self.btn_gen_srt.setEnabled(False)
-        self.btn_translate_srt.setEnabled(False)
-        self.btn_qa_scan.setEnabled(False)
-        self.btn_qa_repair.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
 
@@ -964,10 +931,6 @@ class MainWindowV2(QMainWindow):
         self.progress_bar.setValue(0)
 
         self.btn_run.setEnabled(False)
-        self.btn_gen_srt.setEnabled(False)
-        self.btn_translate_srt.setEnabled(False)
-        self.btn_qa_scan.setEnabled(False)
-        self.btn_qa_repair.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
 
@@ -1032,10 +995,6 @@ class MainWindowV2(QMainWindow):
     def on_process_finished(self, success: bool, message: str):
         self.timer.stop()
         self.btn_run.setEnabled(True)
-        self.btn_gen_srt.setEnabled(True)
-        self.btn_translate_srt.setEnabled(True)
-        self.btn_qa_scan.setEnabled(True)
-        self.btn_qa_repair.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
         self.txt_link.setEnabled(True)

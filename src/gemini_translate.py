@@ -257,7 +257,16 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
                 f"[DƯỚI ĐÂY LÀ NỘI DUNG FILE SRT CẦN DỊCH SANG TIẾNG VIỆT]:\n\n{srt_text}"
             )
 
-        chat_box.fill(full_text)
+        try:
+            chat_box.fill(full_text, timeout=10000)
+        except Exception:
+            # Fallback cho văn bản lớn trong contenteditable div để tránh timeout 30s của Playwright
+            page.evaluate("""
+                ([el, text]) => {
+                    el.innerText = text;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                }
+            """, [chat_box.element_handle(), full_text])
         time.sleep(1)
         
         chat_box.focus()
@@ -393,7 +402,7 @@ def run_auto_translate_srt(
     profile_folder: str = "chrome_data_1",
     check_pause_callback: Optional[Callable] = None,
     blocks_per_split: int = 100,
-    target_speed: float = 0.8,
+    target_speed: float = 1.0,
     **kwargs
 ):
     """

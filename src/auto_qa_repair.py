@@ -163,13 +163,25 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
                 "Dưới đây là báo cáo lỗi SRT. Hãy đọc và trả về các block đã sửa nội dung hoặc timestamp "
                 "theo đúng chuẩn định dạng Repair Engine (chỉ trả về block, ghi [MERGED: x, y] nếu cần gộp)."
             )
-            initial_count = upload_srt_and_send(page, report_path, short_prompt, log_callback)
+            
+            # Thử lại tối đa 2 lần nếu upload báo cáo bị lỗi/timeout
+            max_upload_retries = 2
+            initial_count = None
+            for retry_idx in range(max_upload_retries):
+                initial_count = upload_srt_and_send(page, report_path, short_prompt, log_callback)
+                if initial_count is not None:
+                    break
+                log_callback(f"⚠️ Upload thất bại lần {retry_idx + 1} cho {file_name}. Thử F5 tải lại trang...")
+                try:
+                    page.goto("https://gemini.google.com/app", timeout=60000)
+                    page.wait_for_load_state("load")
+                    time.sleep(5)
+                    send_initial_prompt(page, prompt_file, log_callback)
+                except Exception as e_retry:
+                    log_callback(f"⚠️ Lỗi khi tải lại trang: {e_retry}")
 
             if initial_count is None:
-                log_callback(f"❌ Upload thất bại báo cáo {file_name}. F5 tải lại trang và bỏ qua file này...")
-                page.goto("https://gemini.google.com/app", timeout=60000)
-                time.sleep(5)
-                send_initial_prompt(page, prompt_file, log_callback)
+                log_callback(f"❌ Upload thất bại báo cáo {file_name} sau {max_upload_retries} lần thử. Bỏ qua file này...")
                 continue
 
             success = smart_wait_for_gemini(page, initial_count, wait_time, log_callback)

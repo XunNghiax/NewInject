@@ -29,8 +29,9 @@ def parse_patch_and_deletes(text):
     replace_dict = {}
     delete_set   = set()
 
-    # Chuẩn hóa line ending
-    text = text.replace('\r\n', '\n').strip()
+    # Chuẩn hóa line ending và loại bỏ markdown code fences
+    text = text.replace('\r\n', '\n')
+    text = re.sub(r'```(?:srt)?', '', text, flags=re.IGNORECASE).strip()
 
     # Tách thành các đoạn theo dòng trống
     raw_chunks = re.split(r'\n\s*\n', text)
@@ -53,23 +54,24 @@ def parse_patch_and_deletes(text):
             else:
                 srt_lines.append(line)
 
-        # Parse phần SRT (có thể là 1 block hoàn chỉnh)
-        srt_text = '\n'.join(srt_lines).strip()
-        if srt_text:
-            srt_block_lines = srt_text.split('\n')
-            try:
-                block_id = int(srt_block_lines[0].strip())
-                replace_dict[block_id] = srt_text
-            except ValueError:
-                pass  # Không phải block SRT hợp lệ, bỏ qua
+        # Parse phần SRT (tìm dòng đầu tiên là số nguyên ID block)
+        if srt_lines:
+            id_idx = -1
+            for idx, sl in enumerate(srt_lines):
+                if re.match(r'^\d+$', sl.strip()):
+                    id_idx = idx
+                    break
+
+            if id_idx != -1:
+                block_id = int(srt_lines[id_idx].strip())
+                clean_srt_text = '\n'.join(srt_lines[id_idx:]).strip()
+                replace_dict[block_id] = clean_srt_text
 
         # Parse phần [MERGED] để lấy danh sách block cần xóa
         for mline in merged_lines:
-            # Lấy phần trong dấu ngoặc: [MERGED: 13, 14, 15, 16 → ...]
             m = re.search(r'\[MERGED:\s*([^\]→]+)', mline)
             if m:
                 ids_str = m.group(1)
-                # Tách các số ngăn cách bởi dấu phẩy hoặc space
                 for num_str in re.findall(r'\d+', ids_str):
                     delete_set.add(int(num_str))
 
@@ -90,17 +92,11 @@ def parse_patch_blocks(text):
 # ==============================================================================
 
 def _log_replace(log_callback, block_id, old_text, new_text):
-    formatted_old = old_text.replace('\n', '\n        ')
-    formatted_new = new_text.replace('\n', '\n        ')
-    log_callback(
-        f"   ✓ Replace block {block_id}\n"
-        f"      [CŨ]:\n        {formatted_old}\n"
-        f"      [MỚI]:\n        {formatted_new}\n"
-        f"      " + "-" * 40
-    )
+    log_callback(f"   ✓ Đã thay thế Block {block_id}")
 
 def _log_delete(log_callback, block_id):
-    log_callback(f"   🗑️ Xóa block {block_id} (đã được gộp vào block khác)")
+    log_callback(f"   🗑️ Đã xóa Block {block_id} (gộp block)")
+
 
 
 # ==============================================================================
@@ -121,13 +117,55 @@ def detect_prefix(folder):
     return ""
 
 
-def get_target_file(block_id, folder, prefix):
-    """Xác định tên file dựa trên block_id và tiền tố tự động nhận diện."""
+def build_block_index_map(folder):
+    """
+    Quét thực tế tất cả các file .srt trong folder và các thư mục con 
+    để lập bản đồ: block_id -> đường dẫn file thực tế chứa block đó.
+    """
+    block_map = {}
+    if not os.path.exists(folder):
+        return block_map
+
+    for root, dirs, files in os.walk(folder):
+        for fname in sorted(files, key=lambda x: [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', x)]):
+            if fname.endswith('.srt'):
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        content = '\n' + f.read().replace('\r\n', '\n')
+                    for m in re.finditer(r'\n(\d+)\n\d{2}:\d{2}:\d{2}', content):
+                        b_id = int(m.group(1))
+                        # Ưu tiên các folder tiếng Việt/temp_split_vi nếu có trùng
+                        if b_id not in block_map or "temp_split_vi" in root or "_vi" in root:
+                            block_map[b_id] = fpath
+                except Exception:
+                    pass
+    return block_map
+
+
+def get_target_file(block_id, folder, prefix, block_map=None):
+    """Xác định chính xác tên file chứa block_id bằng block_map hoặc quét thực tế."""
+    if block_map and block_id in block_map:
+        return block_map[block_id]
+
+    # Quét trực tiếp tìm file thực sự chứa block_id
+    if os.path.exists(folder):
+        for root, dirs, files in os.walk(folder):
+            for fname in files:
+                if fname.endswith('.srt'):
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            content = '\n' + f.read().replace('\r\n', '\n')
+                            if f"\n{block_id}\n" in content:
+                                return fpath
+                    except Exception:
+                        pass
+
     file_no = ((block_id - 1) // 100) + 1
     if prefix:
         return os.path.join(folder, f"{prefix}_{file_no}.srt")
-    else:
-        return os.path.join(folder, f"_{file_no}.srt")
+    return os.path.join(folder, f"part_{file_no}.srt")
 
 
 def replace_blocks_in_folder(folder, patch_text, log_callback=print):
@@ -158,15 +196,24 @@ def replace_blocks_in_folder(folder, patch_text, log_callback=print):
     if delete_set:
         log_callback(f"   🗑️ Danh sách block sẽ xóa: {sorted(delete_set)}")
 
+    # Lập bản đồ block_id -> filepath thực tế
+    block_map = build_block_index_map(folder)
+
     # Group tất cả block_id (cả replace lẫn delete) theo file đích
     all_ids = set(replace_dict.keys()) | delete_set
     file_to_ids = defaultdict(set)
     for b_id in all_ids:
-        filepath = get_target_file(b_id, folder, prefix)
+        filepath = get_target_file(b_id, folder, prefix, block_map)
         file_to_ids[filepath].add(b_id)
 
-    # Xử lý từng file
-    for filepath, ids_in_file in file_to_ids.items():
+    # Xử lý từng file (sắp xếp theo thứ tự số tự nhiên: part_1, part_2 ... part_32)
+    def natural_sort_key(s):
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+    sorted_filepaths = sorted(file_to_ids.keys(), key=lambda x: natural_sort_key(os.path.basename(x)))
+
+    for filepath in sorted_filepaths:
+        ids_in_file = file_to_ids[filepath]
         filename = os.path.basename(filepath)
         log_callback(f"\n📄 Đang xử lý file: {filename}")
 

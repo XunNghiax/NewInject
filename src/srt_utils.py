@@ -128,7 +128,7 @@ def time_to_ms(time_str: str) -> int:
     return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
 
 
-def process_single_srt(input_file: str, output_file: str, log_callback: Callable = print):
+def process_single_srt(input_file: str, output_file: str, log_callback: Callable = print, start_index: int = 1):
     """Hàm xử lý Re-index và Check Timeline cho 1 file duy nhất."""
     try:
         with open(input_file, 'r', encoding='utf-8') as f:
@@ -141,7 +141,7 @@ def process_single_srt(input_file: str, output_file: str, log_callback: Callable
         previous_end_time = -1
         overlap_count = 0
         out_of_order_count = 0
-        new_index = 1
+        new_index = start_index
 
         for block in raw_blocks:
             lines = block.split('\n')
@@ -225,7 +225,10 @@ def process_and_renumber_srt(in_path: str, out_path: str, log_callback: Callable
         out_dir = os.path.dirname(out_path) if out_path.lower().endswith('.srt') else out_path
         os.makedirs(out_dir, exist_ok=True)
 
-        srt_files = sorted(f for f in os.listdir(in_path) if f.lower().endswith('.srt'))
+        def natural_sort_key(s):
+            return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
+
+        srt_files = sorted((f for f in os.listdir(in_path) if f.lower().endswith('.srt')), key=natural_sort_key)
         if not srt_files:
             log_callback(f"⚠️ Không tìm thấy file .srt nào trong thư mục: {in_path}")
             return
@@ -234,9 +237,17 @@ def process_and_renumber_srt(in_path: str, out_path: str, log_callback: Callable
 
         for filename in srt_files:
             input_file = os.path.join(in_path, filename)
-            out_name = f"{os.path.splitext(filename)[0]}_reindexed.srt" if in_path == out_dir else filename
-            output_file = os.path.join(out_dir, out_name)
-            process_single_srt(input_file, output_file, log_callback)
+            output_file = os.path.join(out_dir, filename)
+
+            # Nếu là file chia nhỏ (part_X.srt hoặc _X.srt), tính start_index theo file_no để không làm lệch block_id
+            m = re.search(r'(\d+)', filename)
+            if m and ('part_' in filename.lower() or filename.startswith('_') or 'temp_split' in in_path.lower()):
+                file_no = int(m.group(1))
+                start_idx = (file_no - 1) * 100 + 1
+            else:
+                start_idx = 1
+
+            process_single_srt(input_file, output_file, log_callback, start_index=start_idx)
 
         log_callback("\n" + "=" * 50)
         log_callback(f"🎉 HOÀN TẤT! Đã xử lý {len(srt_files)} file.")

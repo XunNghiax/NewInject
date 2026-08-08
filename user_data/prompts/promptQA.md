@@ -145,40 +145,18 @@ CPS phản ánh khối lượng phát âm thực tế chính xác hơn Word Coun
 
 ---
 
-## NGƯỠNG CPS
+## NGƯỠNG CPS & CÔNG THỨC HIỆU CHỈNH
 
-CPS ≤ 19
+1. CÔNG THỨC TÍNH EFFECTIVE CPS:
+   - Effective Duration = Duration - (Số dấu phẩy × 0.20s) - (Số dấu chấm/!/? × 0.40s) - (Số dấu … × 0.50s) - (Số dấu -/– × 0.25s)
+   - Effective CPS = (Số ký tự tiếng Việt thực tế, KHÔNG tính khoảng trắng) / Effective Duration
 
-PASS
-
-19 < CPS ≤ 22
-
-WARNING NHẸ
-
-22 < CPS ≤ 25
-
-WARNING
-
-CPS > 25
-
-WARNING CAO
-
-Lưu ý:
-
-Không cảnh báo chỉ vì CPS cao.
-
-Chỉ cảnh báo khi CPS cao đồng thời xuất hiện:
-
-- duration ngắn
-- nhiều dấu câu
-- nhiều số
-- nhiều từ viết tắt
-- nhiều tên riêng
-- cadence khó đọc
-
-Mục tiêu:
-
-Giảm false positive cho AI Voice/TTS.
+2. BẢNG NGƯỠNG CHUẨN:
+   - Effective CPS ≤ 35: PASS (An toàn)
+   - 35 < Effective CPS ≤ 40: WARNING (CPS dồn toa — nguy cơ hẹp timeline)
+   - Effective CPS > 40: CRITICAL (Ngưỡng CHẾT — TTS hỏng/nuốt âm hoàn toàn)
+   - 2 Block liên tiếp có CPS > 35: CRITICAL (Kẹt timeline nghiêm trọng)
+   - Khoảng trống giữa 2 block > 10.0s: WARNING (Khoảng lặng im bất thường)
 
 ## QUY TẮC FLAG CPS
 
