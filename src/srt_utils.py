@@ -12,6 +12,16 @@ except ImportError:
     pysrt = None
 
 try:
+    import imageio_ffmpeg
+    _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    if _ffmpeg_exe and os.path.exists(_ffmpeg_exe):
+        _ffmpeg_dir = os.path.dirname(_ffmpeg_exe)
+        if _ffmpeg_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
+
+try:
     from pydub import AudioSegment
 except ImportError:
     AudioSegment = None

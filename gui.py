@@ -1338,6 +1338,8 @@ class CapCutInjectorGUI(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    from PyQt6.QtGui import QFont
+    app.setFont(QFont("Segoe UI", 10))
     gui = CapCutInjectorGUI()
     gui.show()
     sys.exit(app.exec())

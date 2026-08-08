@@ -5,7 +5,7 @@ import glob
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Callable, Optional, Dict, Any
+from typing import Callable, Optional, Dict, Any, List, Tuple
 
 try:
     if hasattr(sys.stdout, "reconfigure"):
@@ -180,7 +180,11 @@ class BilibiliDownloader:
             "progress_hooks": [self._ytdlp_progress_hook],
             "quiet": True,
             "no_warnings": True,
-            "concurrent_fragment_downloads": 8,
+            "concurrent_fragment_downloads": 3,
+            "fragment_retries": 10,
+            "retries": 10,
+            "file_access_retries": 5,
+            "http_chunk_size": 10485760,
         }
 
         if FFMPEG_DIR and os.path.exists(FFMPEG_DIR):
@@ -266,7 +270,11 @@ class BilibiliDownloader:
             "-f", "bv*+ba/b",
             "--merge-output-format", "mp4",
             "-o", out_template,
-            "--concurrent-fragments", "8"
+            "--concurrent-fragments", "3",
+            "--fragment-retries", "10",
+            "--retries", "10",
+            "--file-access-retries", "5",
+            "--http-chunk-size", "10485760"
         ]
 
         if FFMPEG_DIR and os.path.exists(FFMPEG_DIR):
@@ -299,3 +307,79 @@ class BilibiliDownloader:
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+def format_netscape_cookies(cookies_list: List[Dict[str, Any]]) -> str:
+    """Chuyển đổi danh sách Cookie từ Playwright thành định dạng tệp Netscape HTTP Cookie File chuẩn."""
+    lines = [
+        "# Netscape HTTP Cookie File",
+        "# http://curl.haxx.se/rfc/cookie_spec.html",
+        "# This is a generated file! Do not edit.",
+        ""
+    ]
+    for c in cookies_list:
+        domain = c.get("domain", "")
+        include_subdomain = "TRUE" if domain.startswith(".") else "FALSE"
+        path = c.get("path", "/")
+        secure = "TRUE" if c.get("secure", False) else "FALSE"
+        expires = str(int(c.get("expires", 0)))
+        name = c.get("name", "")
+        value = c.get("value", "")
+        if name:
+            lines.append(f"{domain}\t{include_subdomain}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
+    return "\n".join(lines) + "\n"
+
+
+def login_bilibili_and_save_cookies(
+    log_callback: Optional[Callable[[str, str], None]] = None,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    timeout_sec: int = 120
+) -> Tuple[bool, str]:
+    """
+    Tự động mở cửa sổ Chrome qua Playwright cho người dùng quét mã QR / đăng nhập Bilibili.
+    Khi phát hiện Cookie SESSDATA, tự động ghi file user_data/cookies/cookies.txt mở khóa 1080p/4K.
+    """
+    import time
+    from playwright.sync_api import sync_playwright
+    log = log_callback if log_callback else (lambda msg, lvl="info": print(f"[{lvl.upper()}] {msg}"))
+
+    log("🌐 Đang mở cửa sổ đăng nhập Bilibili...", "info")
+    output_path = os.path.abspath("./user_data/cookies/cookies.txt")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto("https://passport.bilibili.com/login", wait_until="domcontentloaded")
+            log("🔑 Vui lòng quét mã QR hoặc đăng nhập Bilibili trên cửa sổ vừa mở...", "warning")
+
+            start_time = time.time()
+            sessdata_found = False
+
+            while time.time() - start_time < timeout_sec:
+                all_cookies = context.cookies()
+                for c in all_cookies:
+                    if "bilibili.com" in c.get("domain", "") and c.get("name") == "SESSDATA" and c.get("value"):
+                        sessdata_found = True
+                        break
+
+                if sessdata_found:
+                    log("✅ Đã phát hiện Cookie SESSDATA! Đăng nhập thành công.", "success")
+                    netscape_content = format_netscape_cookies(all_cookies)
+                    with open(output_path, "w", encoding="utf-8") as f:
+                        f.write(netscape_content)
+                    log(f"💾 Đã tự động lưu Cookie VIP vào: {output_path}", "success")
+                    time.sleep(1)
+                    browser.close()
+                    return True, "Đã lưu Cookie Bilibili VIP thành công! Sẵn sàng tải video 1080p/4K."
+
+                time.sleep(1.5)
+
+            browser.close()
+            return False, "Hết thời gian chờ đăng nhập (Timeout 120s)."
+    except Exception as e:
+        log(f"❌ Lỗi đăng nhập Bilibili: {e}", "error")
+        return False, str(e)
+

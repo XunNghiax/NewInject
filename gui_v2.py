@@ -1,16 +1,29 @@
 import sys
 import os
 import time
+import requests
 from datetime import datetime
+
+# Cấu hình đường dẫn ffmpeg từ imageio_ffmpeg vào PATH trước khi import pydub
+try:
+    import imageio_ffmpeg
+    _ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    if _ffmpeg_exe and os.path.exists(_ffmpeg_exe):
+        _ffmpeg_dir = os.path.dirname(_ffmpeg_exe)
+        if _ffmpeg_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QProgressBar, QTextEdit,
     QFrame, QGroupBox, QSplitter, QMessageBox, QToolButton,
-    QComboBox, QCheckBox, QFileDialog
+    QComboBox, QCheckBox, QFileDialog, QTabWidget, QScrollArea,
+    QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QTimer
-from PyQt6.QtGui import QTextCursor, QKeySequence, QShortcut
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QTimer, QUrl
+from PyQt6.QtGui import QTextCursor, QKeySequence, QShortcut, QDesktopServices
 
 # Thêm thư mục src vào sys.path để import modul
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
@@ -48,16 +61,74 @@ except ImportError:
     process_srt_speed = None
     split_srt_file = None
 
+try:
+    from gemini_core import get_available_profiles, create_new_profile, open_chrome_for_login, is_profile_logged_in
+except ImportError:
+    get_available_profiles = None
+    create_new_profile = None
+    open_chrome_for_login = None
+    is_profile_logged_in = None
+
+try:
+    from backend import CapCutBackend
+except ImportError:
+    CapCutBackend = None
+
 
 # ==============================================================================
-# WORKER THREAD ĐỒNG BỘ: HỖ TRỢ TẢI REAL-TIME BILIBILI & GIẢ LẬP
+# WORKER THREAD ĐĂNG NHẬP CHROME
+# ==============================================================================
+class ChromeLoginWorker(QThread):
+    log_signal = pyqtSignal(str, str)         # (log_msg, log_level)
+    finished_signal = pyqtSignal(bool, str)   # (success, final_message)
+
+    def __init__(self, profile_folder: str):
+        super().__init__()
+        self.profile_folder = profile_folder
+
+    def run(self):
+        def log_cb(msg, level="info"):
+            self.log_signal.emit(msg, level)
+
+        try:
+            if open_chrome_for_login:
+                success = open_chrome_for_login(self.profile_folder, log_callback=log_cb)
+                self.finished_signal.emit(success, f"Hoàn tất lưu Profile [{self.profile_folder}]")
+            else:
+                self.log_signal.emit("❌ Không tìm thấy hàm open_chrome_for_login trong gemini_core!", "error")
+                self.finished_signal.emit(False, "Thiếu modul open_chrome_for_login")
+        except Exception as e:
+            self.log_signal.emit(f"❌ Lỗi khi mở Chrome: {e}", "error")
+            self.finished_signal.emit(False, str(e))
+
+
+class BilibiliLoginWorker(QThread):
+    log_signal = pyqtSignal(str, str)
+    finished_signal = pyqtSignal(bool, str)
+
+    def run(self):
+        def log_cb(msg, level="info"):
+            self.log_signal.emit(msg, level)
+
+        try:
+            from bilibili_downloader import login_bilibili_and_save_cookies
+            success, msg = login_bilibili_and_save_cookies(log_callback=log_cb)
+            self.finished_signal.emit(success, msg)
+        except Exception as e:
+            self.log_signal.emit(f"❌ Lỗi đăng nhập Bilibili: {e}", "error")
+            self.finished_signal.emit(False, str(e))
+
+
+# ==============================================================================
+# WORKER THREAD ĐỒNG BỘ: QUY TRÌNH TỰ ĐỘNG END-TO-END (6 BƯỚC)
 # ==============================================================================
 class ProcessWorker(QThread):
     log_signal = pyqtSignal(str, str)         # (log_msg, log_level)
     progress_signal = pyqtSignal(int, str)    # (percentage, status_text)
+    step_signal = pyqtSignal(int)             # Active step index (1-6)
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
 
-    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False):
+    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = ""):
         super().__init__()
         self.link = link
         self.output_dir = output_dir
@@ -67,6 +138,13 @@ class ProcessWorker(QThread):
         self.srt_translate_path = srt_translate_path
         self.qa_scan_path = qa_scan_path
         self.qa_repair_mode = qa_repair_mode
+        self.profile_folder = profile_folder
+        self.auto_inject_capcut = auto_inject_capcut
+        self.capcut_draft_path = capcut_draft_path
+        self.enable_tts = enable_tts
+        self.gradio_url = gradio_url
+        self.ref_audio_path = ref_audio_path
+        self.ref_text = ref_text
         self._is_paused = False
         self._is_stopped = False
         self.downloader = None
@@ -75,7 +153,6 @@ class ProcessWorker(QThread):
         self.pause_condition = QWaitCondition()
 
     def pause(self):
-        """Tạm dừng tiến trình"""
         self.mutex.lock()
         self._is_paused = True
         self.mutex.unlock()
@@ -83,7 +160,6 @@ class ProcessWorker(QThread):
         self.progress_signal.emit(-1, "Đã tạm dừng ⏸️")
 
     def resume(self):
-        """Tiếp tục tiến trình"""
         self.mutex.lock()
         self._is_paused = False
         self.pause_condition.wakeAll()
@@ -91,7 +167,6 @@ class ProcessWorker(QThread):
         self.log_signal.emit("▶️ Đã nhận lệnh TIẾP TỤC tiến trình.", "info")
 
     def stop(self):
-        """Dừng hoàn toàn tiến trình"""
         self.mutex.lock()
         self._is_stopped = True
         if self.downloader:
@@ -111,7 +186,6 @@ class ProcessWorker(QThread):
         self.progress_signal.emit(pct, status)
 
     def check_pause(self):
-        """Kiểm tra và tạm dừng thread ngay lập tức nếu có lệnh pause"""
         self.mutex.lock()
         while self._is_paused:
             self.pause_condition.wait(self.mutex)
@@ -125,12 +199,13 @@ class ProcessWorker(QThread):
             root_downloads = os.path.abspath(self.output_dir)
             os.makedirs(root_downloads, exist_ok=True)
 
-            self.emit_progress(5, "⚡ Khởi động Dự Án Tự Động...")
+            # ── BƯỚC 1: DOWNLOAD ──
+            self.step_signal.emit(1)
+            self.emit_progress(5, "⚡ 1. Khởi động Tải Video...")
             self.emit_log("==================================================", "info")
             self.emit_log("🚀 BẮT ĐẦU QUY TRÌNH XỬ LÝ DỰ ÁN TỰ ĐỘNG (END-TO-END)", "info")
             self.emit_log("==================================================", "info")
 
-            # ── BƯỚC 1: KIỂM TRA THƯ MỤC & TẢI VIDEO ──
             video_file = None
             for f in os.listdir(root_downloads):
                 if f.lower().endswith(('.mp4', '.mkv', '.flv', '.webm')) and not f.endswith('.part'):
@@ -138,7 +213,7 @@ class ProcessWorker(QThread):
                     break
 
             if not video_file and self.link and BilibiliDownloader and BilibiliDownloader.is_valid_bilibili_url(self.link):
-                self.emit_log(f"📥 Thư mục trống. Khởi động tải Video từ Bilibili: {self.link}...", "info")
+                self.emit_log(f"📥 Khởi động tải Video từ Bilibili: {self.link}...", "info")
                 self.emit_progress(10, "Đang tải Video Bilibili...")
                 self.downloader = BilibiliDownloader(
                     output_dir=root_downloads,
@@ -161,14 +236,15 @@ class ProcessWorker(QThread):
             cn_folder = os.path.join(root_downloads, f"temp_split_cn_{raw_title}")
             vi_folder = os.path.join(root_downloads, f"temp_split_vi_{raw_title}")
 
-            # ── BƯỚC 2: KIỂM TRA THƯ MỤC SRT TRUNG QUỐC (temp_split_cn_) ──
+            # ── BƯỚC 2: SPEECH-TO-TEXT (WHISPER STT) ──
+            self.step_signal.emit(2)
             has_cn_splits = os.path.exists(cn_folder) and any(f.endswith('.srt') for f in os.listdir(cn_folder))
 
             if not has_cn_splits:
-                self.emit_log(f"🎙️ Chưa có thư mục SRT Trung Quốc. Tiến hành tạo & xử lý phụ đề gốc...", "info")
+                self.emit_log(f"🎙️ 2. Trích xuất phụ đề tự động bằng Whisper...", "info")
                 raw_srt = None
                 for f in os.listdir(root_downloads):
-                    if f.lower().endswith('.srt') and not f.endswith('_vi.srt') and not f.endswith('_08.srt') and not f.endswith('_speed08.srt'):
+                    if f.lower().endswith('.srt') and f.lower() != 'output.srt' and not f.endswith('_vi.srt') and not f.endswith('_08.srt') and not f.endswith('_speed08.srt'):
                         raw_srt = os.path.join(root_downloads, f)
                         break
 
@@ -187,146 +263,215 @@ class ProcessWorker(QThread):
                     self.finished_signal.emit(False, "❌ Không thể tạo hoặc tìm thấy file phụ đề SRT gốc!")
                     return
 
-                # 2b: Chuyển đổi tốc độ từ 1.0 sang 0.8 (CHỈ 1 LẦN DUY NHẤT từ file SRT gốc)
                 srt_08 = os.path.join(root_downloads, f"{raw_title}_speed08.srt")
                 if not os.path.exists(srt_08):
-                    self.emit_log("⚡ Đang tự động chuyển đổi tốc độ phụ đề SRT gốc từ 1.0x sang 0.8x (Chỉ thực hiện 1 lần duy nhất)...", "info")
+                    self.emit_log("⚡ Đang tự động chuyển đổi tốc độ phụ đề SRT gốc từ 1.0x sang 0.8x...", "info")
                     if process_srt_speed:
-                        process_srt_speed(raw_srt, srt_08, 1.0, 0.8, log_callback=lambda msg: self.emit_log(msg, "info"))
+                        process_srt_speed(raw_srt, srt_08, 1.0, 0.8, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
                     else:
                         srt_08 = raw_srt
 
-                # 2c: Lấy tệp SRT 0.8x vừa tạo chia nhỏ thành 100 block/file lưu vào thư mục cn
-                self.emit_log(f"📁 Đang chia nhỏ tệp SRT 0.8x thành 100 block/file lưu vào thư mục Trung Quốc: {cn_folder}...", "info")
+                self.emit_log(f"📁 Chia nhỏ tệp SRT thành block 100 câu lưu vào: {cn_folder}...", "info")
                 os.makedirs(cn_folder, exist_ok=True)
                 if split_srt_file:
                     prefix_path = os.path.join(cn_folder, "part")
-                    split_srt_file(srt_08, output_prefix=prefix_path, blocks_per_file=100, log_callback=lambda msg: self.emit_log(msg, "info"))
+                    split_srt_file(srt_08, output_prefix=prefix_path, blocks_per_file=100, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
             else:
-                self.emit_log(f"✅ Đã tìm thấy thư mục phụ đề Trung Quốc: {cn_folder}", "info")
+                self.emit_log(f"✅ Đã tìm thấy thư mục phụ đề gốc: {cn_folder}", "info")
 
-            # ── BƯỚC 3: DỊCH THUẬT CN -> VI (temp_split_vi_) ──
-            self.emit_progress(40, "Đang kiểm tra & chạy Gemini AI dịch Tiếng Việt...")
+            # ── BƯỚC 3: DỊCH THUẬT AI (GEMINI) ──
+            self.step_signal.emit(3)
+            self.emit_progress(45, "3. Đang chạy Gemini AI dịch Tiếng Việt...")
             os.makedirs(vi_folder, exist_ok=True)
 
-            cn_splits = [f for f in os.listdir(cn_folder) if f.endswith('.srt')] if os.path.exists(cn_folder) else []
-            vi_splits = [f for f in os.listdir(vi_folder) if f.endswith('.srt')] if os.path.exists(vi_folder) else []
+            if run_auto_translate_srt:
+                prompt_file = os.path.abspath("./user_data/prompts/promptTranslates.md")
+                if not os.path.exists(prompt_file):
+                    prompt_file = os.path.abspath("./user_data/prompts/translate.txt")
+                if not os.path.exists(prompt_file):
+                    os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
+                    with open(prompt_file, "w", encoding="utf-8") as pf:
+                        pf.write("Hãy dịch chính xác file SRT này sang Tiếng Việt. Giữ nguyên định dạng mốc thời gian.")
 
-            def check_split_translated(cf_name):
-                raw_bname = os.path.splitext(cf_name)[0]
-                cand1 = os.path.join(vi_folder, cf_name)
-                cand2 = os.path.join(vi_folder, f"{raw_bname}_vi.srt")
-                return (os.path.exists(cand1) and os.path.getsize(cand1) > 50) or (os.path.exists(cand2) and os.path.getsize(cand2) > 50)
+                run_auto_translate_srt(
+                    prompt_file=prompt_file,
+                    cn_folder=cn_folder,
+                    vi_folder=vi_folder,
+                    profile_folder=self.profile_folder,
+                    wait_time=300,
+                    delay_time=15,
+                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                    check_pause_callback=self.check_pause
+                )
 
-            is_all_vi_translated = (
-                len(cn_splits) > 0 and
-                len(vi_splits) >= len(cn_splits) and
-                all(check_split_translated(cf) for cf in cn_splits)
-            )
-
-            if is_all_vi_translated:
-                self.emit_log(f"⏩ [CHECKPOINT] Đã tìm thấy đầy đủ {len(vi_splits)} phân đoạn Tiếng Việt hoàn chỉnh tại: {vi_folder}. BỎ QUA BƯỚC DỊCH THUẬT, CHUYỂN SANG BƯỚC TỐI ƯU QA!", "success")
-            else:
-                self.emit_log(f"🌐 Đang dịch các phân đoạn từ '{cn_folder}' sang Tiếng Việt lưu tại '{vi_folder}'...", "info")
-                prompt_trans = "./user_data/prompts/promptTranslates.md"
-                if not os.path.exists(prompt_trans):
-                    prompt_trans = "./prompts/promptTranslates.md"
-
-                if run_auto_translate_srt:
-                    run_auto_translate_srt(
-                        prompt_file=prompt_trans,
-                        cn_folder=cn_folder,
-                        vi_folder=vi_folder,
-                        target_speed=1.0,
-                        wait_time=300,
-                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                        check_pause_callback=self.check_pause
-                    )
-
-            # ── BƯỚC 4: VÁ LỖI QA & KIỂM TRA LẠI (QA REPAIR & RE-CHECK) ──
-            self.emit_progress(70, "Đang chạy vòng lặp kiểm tra & vá lỗi QA...")
-            report_dir = os.path.join(root_downloads, "report")
-            os.makedirs(report_dir, exist_ok=True)
-
-            prompt_repair = "./user_data/prompts/promptRepair.md"
-            if not os.path.exists(prompt_repair):
-                prompt_repair = "./prompts/promptRepair.md"
-
-            MAX_PASSES = 5
-            pass_num = 1
-
-            while pass_num <= MAX_PASSES:
-                self.check_pause()
-                self.emit_log(f"\n🔄 ===== BẮT ĐẦU VÒNG VÁ LỖI QA THỨ {pass_num}/{MAX_PASSES} =====", "info")
-                
-                if run_auto_qa_repair:
-                    run_auto_qa_repair(
-                        prompt_file=prompt_repair,
-                        report_folder=report_dir,
-                        original_srt_folder=vi_folder,
-                        fixed_srt_folder=vi_folder,
-                        profile_folder="chrome_data_1",
-                        wait_time=300,
-                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                    )
-
-                if process_and_renumber_srt:
-                    process_and_renumber_srt(vi_folder, vi_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
-
-                recheck_out = os.path.join(report_dir, f"Report_ReCheck_Pass_{pass_num}.txt")
-                total_err, total_crit, total_warn = 0, 0, 0
-
-                if analyze_srt_to_file:
-                    res = analyze_srt_to_file(
-                        in_path=vi_folder,
-                        out_path=recheck_out,
-                        errors_per_file=80,
-                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                        scan_mode='all'
-                    )
-                    if res:
-                        total_err, total_crit, total_warn = res
-
-                if total_crit == 0:
-                    self.emit_log(f"🎉 THÀNH CÔNG RỰC RỠ! Không còn lỗi CRITICAL nào sau {pass_num} vòng vá!", "success")
-                    break
-                else:
-                    if pass_num < MAX_PASSES:
-                        self.emit_log(f"⚠️ Vẫn còn {total_crit} lỗi CRITICAL. Tiếp tục vòng vá {pass_num + 1}/{MAX_PASSES}...", "warning")
-                        pass_num += 1
-                    else:
-                        self.emit_log(f"🛑 Đã đạt {MAX_PASSES} vòng vá tối đa. Còn {total_crit} lỗi CRITICAL.", "warning")
-                        break
-
-            # ── BƯỚC 5: GỘP FILE THÀNH PHẨM (MERGE FINAL SRT) ──
-            self.emit_progress(95, "Đang gộp toàn bộ phân đoạn thành 1 file phụ đề duy nhất...")
-            final_srt_path = os.path.join(root_downloads, f"{raw_title}_vi.srt")
-
+            final_srt_path = os.path.join(root_downloads, "output.srt")
             if merge_numbered_srt_files:
+                self.emit_log("🧩 Đang gộp các tệp SRT Tiếng Việt đã dịch...", "info")
                 merge_numbered_srt_files(vi_folder, final_srt_path, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
 
-            self.emit_progress(100, "HOÀN TẤT TOÀN BỘ DỰ ÁN! 🎉")
-            self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 File phụ đề thành phẩm lưu tại:\n{final_srt_path}")
+            # ── BƯỚC 4: AUTO QA & REPAIR ──
+            self.step_signal.emit(4)
+            self.emit_progress(65, "4. Đang kiểm tra QA & tự động sửa lỗi SRT...")
+            report_folder = os.path.join(root_downloads, f"temp_split_qa_reports_{raw_title}")
+            fixed_vi_folder = os.path.join(root_downloads, f"temp_split_vi_fixed_{raw_title}")
+
+            if analyze_srt_to_file:
+                analyze_srt_to_file(vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+
+            if run_auto_qa_repair:
+                qa_prompt = os.path.abspath("./user_data/prompts/promptRepair.md")
+                if not os.path.exists(qa_prompt):
+                    qa_prompt = os.path.abspath("./user_data/prompts/prompt_qa_repair.txt")
+                if not os.path.exists(qa_prompt):
+                    os.makedirs(os.path.dirname(qa_prompt), exist_ok=True)
+                    with open(qa_prompt, "w", encoding="utf-8") as qf:
+                        qf.write("Hãy kiểm tra và sửa lỗi các câu phụ đề vượt quá độ dài hoặc đè timecode.")
+                run_auto_qa_repair(
+                    prompt_file=qa_prompt,
+                    report_folder=report_folder,
+                    original_srt_folder=vi_folder,
+                    fixed_srt_folder=fixed_vi_folder,
+                    profile_folder=self.profile_folder,
+                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl)
+                )
+
+                # Sau khi Auto QA sửa lỗi xong, tái gộp các file từ thư mục fixed_vi_folder vào file tổng
+                if merge_numbered_srt_files and os.path.exists(fixed_vi_folder) and os.listdir(fixed_vi_folder):
+                    self.emit_log("🧩 Đang tái gộp các tệp SRT Tiếng Việt ĐÃ SỬA LỖI (FIXED) vào file hoàn chỉnh...", "info")
+                    merge_numbered_srt_files(fixed_vi_folder, final_srt_path, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+
+            # ── BƯỚC 5: SINH AUDIO (TTS GRADIO) ──
+            self.step_signal.emit(5)
+            if self.enable_tts:
+                self.emit_progress(80, "5. Đang sinh Audio bằng Gradio TTS Server...")
+                self.emit_log("🎙️ Khởi động sinh giọng nói AI từ phụ đề SRT...", "info")
+
+            # ── BƯỚC 6: CAPCUT DRAFT INJECT ──
+            self.step_signal.emit(6)
+            if self.auto_inject_capcut and self.capcut_draft_path and os.path.exists(self.capcut_draft_path):
+                self.emit_progress(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
+                self.emit_log(f"💉 Bơm phụ đề vào CapCut Draft: {self.capcut_draft_path}...", "info")
+                
+                draft_json = os.path.join(self.capcut_draft_path, "draft_content.json")
+                if os.path.exists(draft_json) and CapCutBackend:
+                    try:
+                        cfg = {
+                            "SRT_FILE_PATH": final_srt_path,
+                            "CAPCUT_JSON_PATH": draft_json,
+                            "AUDIO_OUT_DIR": os.path.join(root_downloads, "audio_tts_out"),
+                            "SERVER_URL": self.gradio_url,
+                            "REF_AUDIO_PATH": self.ref_audio_path,
+                            "REF_TEXT": self.ref_text,
+                            "GROUP_SRT": True,
+                            "SPEED_RATIO": 0.8
+                        }
+                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                        backend.ensure_capcut_closed()
+                        backend.run_process(only_inject=not self.enable_tts)
+                        self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")
+                    except Exception as inject_e:
+                        self.emit_log(f"⚠️ Thất bại khi nhúng vào CapCut: {inject_e}", "warning")
+
+            self.emit_progress(100, "HOÀN TẤT DỰ ÁN! 🎉")
+            self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 Phụ đề lưu tại: {final_srt_path}")
 
         except Exception as e:
             self.emit_log(f"❌ Lỗi tiến trình tự động: {e}", "error")
             self.finished_signal.emit(False, str(e))
 
-        except Exception as e:
-            self.log_signal.emit(f"❌ Lỗi ngoài dự kiến: {str(e)}", "error")
-            self.finished_signal.emit(False, f"Lỗi: {str(e)}")
+
+def get_default_capcut_path() -> str:
+    """Tự động định vị đường dẫn thư mục lưu dự án của phần mềm CapCut PC trên Windows."""
+    appdata = os.getenv('LOCALAPPDATA', '')
+    if appdata:
+        p = os.path.join(appdata, 'CapCut', 'User Data', 'Projects', 'com.lveditor.draft')
+        if os.path.exists(p):
+            return p
+    return ""
 
 
 # ==============================================================================
-# GIAO DIỆN CHÍNH CAO CẤP (GUI V2 PRO - AUTO DOWNLOAD BILIBILI)
+# WIDGET THANH TIẾN TRÌNH 6 BƯỚC (VISUAL PIPELINE STEPPER V3)
+# ==============================================================================
+class PipelineStepperWidget(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("PipelineStepper")
+        self.current_step = 1
+        self.steps = [
+            ("1. Download", "📥"),
+            ("2. Whisper STT", "🎙️"),
+            ("3. AI Translate", "🌐"),
+            ("4. Auto QA", "🧹"),
+            ("5. Sinh Audio", "🔊"),
+            ("6. CapCut Inject", "💉")
+        ]
+        self.step_labels = []
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 6, 12, 6)
+        layout.setSpacing(6)
+
+        for i, (title, icon) in enumerate(self.steps, 1):
+            lbl = QLabel(f"{icon} {title}")
+            lbl.setObjectName(f"StepBadge_{i}")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setFixedHeight(32)
+            layout.addWidget(lbl, stretch=1)
+            self.step_labels.append(lbl)
+
+            if i < len(self.steps):
+                arrow = QLabel("➔")
+                arrow.setStyleSheet("color: #475569; font-weight: bold; font-size: 10pt;")
+                layout.addWidget(arrow)
+
+        self.set_step(1)
+
+    def set_step(self, active_step: int, status: str = "running"):
+        self.current_step = active_step
+        for i, lbl in enumerate(self.step_labels, 1):
+            if i < active_step:
+                lbl.setStyleSheet("""
+                    background-color: #064e3b; color: #34d399; font-weight: bold; 
+                    font-size: 9.5pt; border-radius: 6px; border: 1px solid #059669;
+                """)
+                lbl.setText(f"✅ {self.steps[i-1][0]}")
+            elif i == active_step:
+                if status == "running":
+                    lbl.setStyleSheet("""
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #2563eb); 
+                        color: white; font-weight: bold; font-size: 9.5pt; border-radius: 6px; 
+                        border: 1px solid #38bdf8;
+                    """)
+                    lbl.setText(f"⏳ {self.steps[i-1][0]}")
+                elif status == "error":
+                    lbl.setStyleSheet("""
+                        background-color: #7f1d1d; color: #fca5a5; font-weight: bold; 
+                        font-size: 9.5pt; border-radius: 6px; border: 1px solid #ef4444;
+                    """)
+                    lbl.setText(f"⚠️ {self.steps[i-1][0]}")
+            else:
+                lbl.setStyleSheet("""
+                    background-color: #1e293b; color: #64748b; font-weight: 500; 
+                    font-size: 9.5pt; border-radius: 6px; border: 1px solid #334155;
+                """)
+                lbl.setText(f"{self.steps[i-1][1]} {self.steps[i-1][0]}")
+
+
+# ==============================================================================
+# GIAO DIỆN CHÍNH (CAPCUTINJECTOR PRO STUDIO V7 UNIFIED CONSOLE SYSTEM)
 # ==============================================================================
 class MainWindowV2(QMainWindow):
     def __init__(self):
         super().__init__()
         self.worker = None
+        self.login_worker = None
         self.is_paused = False
         self.start_timestamp = None
         self.logs_history = []
+        self.is_voice_expanded = False
         
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -337,53 +482,103 @@ class MainWindowV2(QMainWindow):
         self.load_user_config()
 
     def init_ui(self):
-        self.setWindowTitle("Trình Tải Video Bilibili Tốc Độ Cao - GUI V2 PRO 🚀")
-        self.resize(1080, 740)
-        self.setMinimumSize(880, 580)
+        self.setWindowTitle("CapcutInjector Pro Studio v3 - Hệ Thống Tự Động Hóa 1-Click 🚀")
+        self.resize(1260, 840)
+        self.setMinimumSize(1000, 660)
 
         self.setup_stylesheet()
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(12, 10, 12, 10)
+        main_layout.setSpacing(8)
 
         # ----------------------------------------------------------------------
-        # 1. HEADER BANNER MODERN
+        # 1. HEADER BANNER TOP (TÍCH HỢP CHROME PROFILE VÀO HEADER TOP)
         # ----------------------------------------------------------------------
         header_frame = QFrame()
         header_frame.setObjectName("HeaderFrame")
         header_layout = QHBoxLayout(header_frame)
-        header_layout.setContentsMargins(20, 14, 20, 14)
+        header_layout.setContentsMargins(16, 6, 16, 6)
 
         header_text_layout = QVBoxLayout()
-        header_text_layout.setSpacing(4)
+        header_text_layout.setSpacing(0)
 
-        title_label = QLabel("⚡ TRÌNH TẢI VIDEO BILIBILI CHUYÊN NGHIỆP (GUI V2 PRO)")
+        title_label = QLabel("⚡ CAPCUT INJECTOR PRO STUDIO v3.0")
         title_label.setObjectName("MainTitle")
-        
-        subtitle_label = QLabel("Tự động tải video chất lượng cao nhất (1080p/4K MP4) | Chống bị chặn 403 & Rate Limit")
-        subtitle_label.setObjectName("SubTitle")
 
         header_text_layout.addWidget(title_label)
-        header_text_layout.addWidget(subtitle_label)
-        header_layout.addLayout(header_text_layout, stretch=1)
+        header_layout.addLayout(header_text_layout)
+        header_layout.addStretch(1)
 
-        self.lbl_cookie_badge = QLabel("🍪 COOKIE: CHƯA CÓ")
-        self.lbl_cookie_badge.setObjectName("SystemBadge")
-        self.lbl_cookie_badge.setStyleSheet("background-color: #334155; color: #94a3b8;")
+        # CỤM KHU VỰC CHỌN CHROME PROFILE TRÊN HEADER TOP
+        profile_top_layout = QHBoxLayout()
+        profile_top_layout.setSpacing(6)
+
+        lbl_profile = QLabel("🌐 Profile Chrome:")
+        lbl_profile.setStyleSheet("color: #e2e8f0; font-weight: 600; font-size: 9.5pt;")
+
+        self.cbo_profile = QComboBox()
+        self.cbo_profile.setObjectName("ProfileCombo")
+        self.cbo_profile.setMinimumWidth(140)
+        self.cbo_profile.setFixedHeight(28)
+        self.cbo_profile.currentIndexChanged.connect(self.save_user_config)
+        self.cbo_profile.currentIndexChanged.connect(self.update_profile_login_status_ui)
+
+        self.btn_new_profile = QToolButton()
+        self.btn_new_profile.setText("➕")
+        self.btn_new_profile.setFixedSize(28, 28)
+        self.btn_new_profile.setObjectName("ToolBtn")
+        self.btn_new_profile.setStyleSheet("padding: 0px; margin: 0px; min-width: 28px; max-width: 28px; min-height: 28px; max-height: 28px; border-radius: 5px; text-align: center; font-size: 10pt;")
+        self.btn_new_profile.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_new_profile.setToolTip("Tạo Profile Chrome Mới")
+        self.btn_new_profile.clicked.connect(self.on_create_profile_clicked)
+
+        self.btn_login_chrome = QToolButton()
+        self.btn_login_chrome.setText("🔑 Login")
+        self.btn_login_chrome.setMinimumWidth(85)
+        self.btn_login_chrome.setFixedHeight(28)
+        self.btn_login_chrome.setObjectName("ToolBtnAccent")
+        self.btn_login_chrome.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_login_chrome.clicked.connect(self.on_login_chrome_clicked)
+
+        profile_top_layout.addWidget(lbl_profile)
+        profile_top_layout.addWidget(self.cbo_profile)
+        profile_top_layout.addWidget(self.btn_new_profile)
+        profile_top_layout.addWidget(self.btn_login_chrome)
+
+        header_layout.addLayout(profile_top_layout)
+
+        # NÚT BÁO TRẠNG THÁI COOKIE BILIBILI VIP TRÊN HEADER
+        self.btn_login_bilibili = QToolButton()
+        self.btn_login_bilibili.setText("🍪 Bilibili : Chưa Login")
+        self.btn_login_bilibili.setMinimumWidth(185)
+        self.btn_login_bilibili.setFixedHeight(28)
+        self.btn_login_bilibili.setObjectName("ToolBtn")
+        self.btn_login_bilibili.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_login_bilibili.setToolTip("Nhấp vào đây để đăng nhập Bilibili và nạp Cookie VIP 1080p/4K")
+        self.btn_login_bilibili.clicked.connect(self.on_login_bilibili_clicked)
 
         self.lbl_system_badge = QLabel("🟢 SẴN SÀNG")
         self.lbl_system_badge.setObjectName("SystemBadge")
+        self.lbl_system_badge.setMinimumWidth(100)
+        self.lbl_system_badge.setFixedHeight(28)
+        self.set_badge_style(self.lbl_system_badge, "#059669", "white")
         
-        header_layout.addWidget(self.lbl_cookie_badge)
+        header_layout.addWidget(self.btn_login_bilibili)
         header_layout.addWidget(self.lbl_system_badge)
 
         main_layout.addWidget(header_frame)
 
         # ----------------------------------------------------------------------
-        # 2. CHỌN KHU VỰC VỚI QSPLITTER (CHO PHÉP KÉO THAY ĐỔI KÍCH THƯỚC)
+        # 2. PIPELINE STEPPER TRACKER (6 BƯỚC)
+        # ----------------------------------------------------------------------
+        self.stepper_widget = PipelineStepperWidget()
+        main_layout.addWidget(self.stepper_widget)
+
+        # ----------------------------------------------------------------------
+        # 3. SPLITTER CHÍNH (TOP INPUT CARDS vs BOTTOM UNIFIED EXECUTION CONSOLE)
         # ----------------------------------------------------------------------
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(False)
@@ -391,143 +586,341 @@ class MainWindowV2(QMainWindow):
         top_panel = QWidget()
         top_layout = QVBoxLayout(top_panel)
         top_layout.setContentsMargins(0, 0, 0, 0)
-        top_layout.setSpacing(14)
+        top_layout.setSpacing(6)
 
-        # --- Card 1: Cấu hình & Ô Nhập Link ---
-        input_group = QGroupBox("📌 Nhập Link Video Bilibili (Tự Động Bắt Đầu Tải Khi Dán Link)")
-        input_group.setObjectName("InputGroup")
-        input_layout = QVBoxLayout(input_group)
-        input_layout.setContentsMargins(18, 18, 18, 18)
-        input_layout.setSpacing(14)
+        # ── MASTER CARD 1: CẤU HÌNH DỰ ÁN BẤT ĐỐI XỨNG SO LE ──
+        card1_group = QGroupBox("🎬 Cấu Hình Dự Án & Gradio Server URL (Bố Cục Bất Đối Xứng)")
+        card1_group.setObjectName("MasterCard")
+        card1_layout = QVBoxLayout(card1_group)
+        card1_layout.setContentsMargins(12, 8, 12, 8)
+        card1_layout.setSpacing(6)
 
-        # Dòng nhập Link
-        link_box_layout = QHBoxLayout()
-        link_box_layout.setSpacing(10)
+        # HÀNG 1 (SO LE 65% : 35%): LINK BILIBILI (65%) + GRADIO SERVER URL (35%)
+        row1_layout = QHBoxLayout()
+        row1_layout.setSpacing(10)
 
-        lbl_link = QLabel("🔗 Link Bilibili:")
+        # Link Bilibili Column (65% width)
+        col_link = QVBoxLayout()
+        lbl_link = QLabel("🔗 Nguồn Đầu Vào (Link Bilibili / File Video / SRT): *")
         lbl_link.setObjectName("InputLabel")
-
+        link_box = QHBoxLayout()
+        link_box.setSpacing(6)
         self.txt_link = QLineEdit()
-        self.txt_link.setObjectName("LinkInput")
-        self.txt_link.setPlaceholderText("Dán liên kết Bilibili (https://www.bilibili.com/video/BV...) vào đây...")
-        self.txt_link.setToolTip("Nhập hoặc dán link Bilibili (Nhấn nút BẮT ĐẦU DỰ ÁN TỰ ĐỘNG để chạy)")
+        self.txt_link.setObjectName("MasterInput")
+        self.txt_link.setPlaceholderText("Dán link Bilibili (https://...) hoặc chọn file Media/SRT...")
 
         self.btn_paste_link = QToolButton()
-        self.btn_paste_link.setText("📋 Dán Link")
+        self.btn_paste_link.setText("📋 Dán")
         self.btn_paste_link.setObjectName("ToolBtnAccent")
-        self.btn_paste_link.setToolTip("Dán nhanh đường dẫn video Bilibili từ Clipboard")
+        self.btn_paste_link.setFixedWidth(65)
         self.btn_paste_link.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_paste_link.clicked.connect(self.paste_link_only)
 
+        self.btn_browse_input = QToolButton()
+        self.btn_browse_input.setText("📂 File")
+        self.btn_browse_input.setObjectName("ToolBtn")
+        self.btn_browse_input.setFixedWidth(65)
+        self.btn_browse_input.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_browse_input.clicked.connect(self.browse_smart_input_file)
+
         self.btn_clear_link = QToolButton()
-        self.btn_clear_link.setText("❌ Xóa")
+        self.btn_clear_link.setText("❌")
         self.btn_clear_link.setObjectName("ToolBtn")
+        self.btn_clear_link.setFixedWidth(40)
         self.btn_clear_link.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_clear_link.clicked.connect(lambda: self.txt_link.clear())
 
-        link_box_layout.addWidget(lbl_link)
-        link_box_layout.addWidget(self.txt_link, stretch=1)
-        link_box_layout.addWidget(self.btn_paste_link)
-        link_box_layout.addWidget(self.btn_clear_link)
-        input_layout.addLayout(link_box_layout)
+        link_box.addWidget(self.txt_link, stretch=1)
+        link_box.addWidget(self.btn_paste_link)
+        link_box.addWidget(self.btn_browse_input)
+        link_box.addWidget(self.btn_clear_link)
+        col_link.addWidget(lbl_link)
+        col_link.addLayout(link_box)
 
-        # Dòng Tùy Chọn Thư Mục Lưu
-        opt_layout = QHBoxLayout()
-        opt_layout.setSpacing(12)
+        # Gradio Server URL Column (35% width)
+        col_gradio = QVBoxLayout()
+        gradio_hdr_sub = QHBoxLayout()
+        lbl_g_url = QLabel("🌐 Gradio URL (Thay đổi): *")
+        lbl_g_url.setObjectName("InputLabel")
+        self.lbl_gradio_status = QLabel("⚪ Chưa kiểm tra")
+        self.lbl_gradio_status.setObjectName("StatusBadge")
+        self.set_badge_style(self.lbl_gradio_status, "#334155", "#94a3b8")
+        gradio_hdr_sub.addWidget(lbl_g_url)
+        gradio_hdr_sub.addStretch()
+        gradio_hdr_sub.addWidget(self.lbl_gradio_status)
 
-        lbl_dir = QLabel("📁 Thư mục lưu:")
-        lbl_dir.setStyleSheet("color: #cbd5e1; font-weight: 600; font-size: 12px;")
+        gradio_box = QHBoxLayout()
+        gradio_box.setSpacing(6)
+        self.txt_gradio_url = QLineEdit()
+        self.txt_gradio_url.setObjectName("MasterInput")
+        self.txt_gradio_url.setPlaceholderText("Link Gradio mới...")
+        self.txt_gradio_url.editingFinished.connect(self.save_user_config)
 
+        self.btn_paste_gradio = QToolButton()
+        self.btn_paste_gradio.setText("📋 Dán")
+        self.btn_paste_gradio.setObjectName("ToolBtnAccent")
+        self.btn_paste_gradio.setFixedWidth(65)
+        self.btn_paste_gradio.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_paste_gradio.clicked.connect(self.paste_gradio_url)
+
+        self.btn_ping_gradio = QToolButton()
+        self.btn_ping_gradio.setText("⚡ Ping")
+        self.btn_ping_gradio.setObjectName("ToolBtn")
+        self.btn_ping_gradio.setFixedWidth(65)
+        self.btn_ping_gradio.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ping_gradio.clicked.connect(self.on_ping_gradio)
+
+        gradio_box.addWidget(self.txt_gradio_url, stretch=1)
+        gradio_box.addWidget(self.btn_paste_gradio)
+        gradio_box.addWidget(self.btn_ping_gradio)
+        col_gradio.addLayout(gradio_hdr_sub)
+        col_gradio.addLayout(gradio_box)
+
+        row1_layout.addLayout(col_link, stretch=55)
+        row1_layout.addLayout(col_gradio, stretch=45)
+        card1_layout.addLayout(row1_layout)
+
+        # HÀNG 2 (SO LE 35% : 65%): THƯ MỤC DỰ ÁN (35%) + CAPCUT DRAFT PATH (65%)
+        row2_layout = QHBoxLayout()
+        row2_layout.setSpacing(10)
+
+        # Output Dir Column (35% width)
+        col_out = QVBoxLayout()
+        lbl_dir = QLabel("📁 Thư Mục Dự Án (Output): *")
+        lbl_dir.setObjectName("InputLabel")
+        dir_box = QHBoxLayout()
+        dir_box.setSpacing(6)
         self.txt_output_dir = QLineEdit("./downloads")
-        self.txt_output_dir.setObjectName("DirInput")
-        self.txt_output_dir.setToolTip("Thư mục lưu trữ dự án video & phụ đề thành phẩm")
+        self.txt_output_dir.setObjectName("MasterInput")
         self.txt_output_dir.editingFinished.connect(self.save_user_config)
 
         self.btn_browse_dir = QToolButton()
-        self.btn_browse_dir.setText("📂 Chọn...")
+        self.btn_browse_dir.setText("📂 Chọn")
         self.btn_browse_dir.setObjectName("ToolBtn")
+        self.btn_browse_dir.setMinimumWidth(65)
         self.btn_browse_dir.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_browse_dir.clicked.connect(self.browse_output_directory)
 
-        opt_layout.addWidget(lbl_dir)
-        opt_layout.addWidget(self.txt_output_dir, stretch=1)
-        opt_layout.addWidget(self.btn_browse_dir)
-        input_layout.addLayout(opt_layout)
+        self.btn_open_dir = QToolButton()
+        self.btn_open_dir.setText("📁 Mở")
+        self.btn_open_dir.setObjectName("ToolBtn")
+        self.btn_open_dir.setMinimumWidth(60)
+        self.btn_open_dir.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_dir.clicked.connect(self.open_output_directory)
 
-        # Dòng Button duy nhất điều khiển dự án tự động
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(12)
+        dir_box.addWidget(self.txt_output_dir, stretch=1)
+        dir_box.addWidget(self.btn_browse_dir)
+        dir_box.addWidget(self.btn_open_dir)
+        col_out.addWidget(lbl_dir)
+        col_out.addLayout(dir_box)
 
-        self.btn_run = QPushButton("🚀 BẮT ĐẦU DỰ ÁN TỰ ĐỘNG")
-        self.btn_run.setObjectName("BtnRun")
-        self.btn_run.setToolTip("Khởi động toàn bộ dự án: Tải Video -> Tạo SRT -> Đổi Tốc Độ 0.8 -> Chia Block -> Dịch Tiếng Việt -> Vá Lỗi QA -> Gộp Thành Phẩm (Ctrl+Enter)")
-        self.btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_run.clicked.connect(self.on_run_clicked)
+        # CapCut Draft Column (65% width)
+        col_draft = QVBoxLayout()
+        lbl_draft = QLabel("📂 Đường Dẫn CapCut PC Draft Path: *")
+        lbl_draft.setObjectName("InputLabel")
+        draft_box = QHBoxLayout()
+        draft_box.setSpacing(6)
+        self.txt_capcut_draft = QLineEdit()
+        self.txt_capcut_draft.setObjectName("MasterInput")
+        default_cp_path = get_default_capcut_path()
+        if default_cp_path:
+            self.txt_capcut_draft.setText(default_cp_path)
+        self.txt_capcut_draft.setPlaceholderText("Thư mục com.lveditor.draft...")
+        self.txt_capcut_draft.editingFinished.connect(self.save_user_config)
+
+        self.btn_browse_draft = QToolButton()
+        self.btn_browse_draft.setText("📂 Draft")
+        self.btn_browse_draft.setObjectName("ToolBtn")
+        self.btn_browse_draft.setMinimumWidth(75)
+        self.btn_browse_draft.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_browse_draft.clicked.connect(self.browse_capcut_draft)
+
+        self.btn_auto_detect_draft = QToolButton()
+        self.btn_auto_detect_draft.setText("🔍 Auto-Detect")
+        self.btn_auto_detect_draft.setObjectName("ToolBtnAccent")
+        self.btn_auto_detect_draft.setMinimumWidth(140)
+        self.btn_auto_detect_draft.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto_detect_draft.clicked.connect(self.on_auto_detect_capcut)
+
+        draft_box.addWidget(self.txt_capcut_draft, stretch=1)
+        draft_box.addWidget(self.btn_browse_draft)
+        draft_box.addWidget(self.btn_auto_detect_draft)
+        col_draft.addWidget(lbl_draft)
+        col_draft.addLayout(draft_box)
+
+        row2_layout.addLayout(col_out, stretch=35)
+        row2_layout.addLayout(col_draft, stretch=65)
+        card1_layout.addLayout(row2_layout)
+
+        # Row Checkboxes (TRẠNG THÁI TẠO GIỌNG AI LUÔN LUÔN LÀ TRUE)
+        check_row = QHBoxLayout()
+        self.chk_auto_inject_capcut = QCheckBox("💉 Tự động nhúng phụ đề vào CapCut PC Draft")
+        self.chk_auto_inject_capcut.setChecked(True)
+        self.chk_auto_inject_capcut.setObjectName("AccentCheck")
+        self.chk_auto_inject_capcut.toggled.connect(self.save_user_config)
+
+        self.chk_enable_tts = QCheckBox("🎙️ Kích hoạt tạo giọng AI (TTS Engine)")
+        self.chk_enable_tts.setChecked(True)  # LUÔN MẶC ĐỊNH LÀ TRUE
+        self.chk_enable_tts.setObjectName("PurpleCheck")
+        self.chk_enable_tts.toggled.connect(self.save_user_config)
+        
+        check_row.addWidget(self.chk_auto_inject_capcut)
+        check_row.addWidget(self.chk_enable_tts)
+        check_row.addStretch()
+        card1_layout.addLayout(check_row)
+
+        top_layout.addWidget(card1_group)
+
+        # ── CARD 2: KHUNG ẨN/HIỆN CẤU HÌNH VOICE MẪU (COLLAPSIBLE PANEL) ──
+        self.card_voice_group = QGroupBox()
+        self.card_voice_group.setObjectName("MasterCardVoice")
+        card_voice_layout = QVBoxLayout(self.card_voice_group)
+        card_voice_layout.setContentsMargins(12, 2, 12, 2)
+        card_voice_layout.setSpacing(2)
+
+        # Toggle Expander Header Bar
+        self.btn_toggle_voice = QPushButton("🔽 Mở Cấu Hình Voice Mẫu (.wav) & Văn Bản Transcript (Bấm để Mở/Đóng)")
+        self.btn_toggle_voice.setObjectName("ExpanderBtn")
+        self.btn_toggle_voice.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_voice.clicked.connect(self.toggle_voice_panel)
+        card_voice_layout.addWidget(self.btn_toggle_voice)
+
+        # Sub-container chứa Voice Audio & Text Transcript (Mặc định ẩn)
+        self.voice_content_widget = QWidget()
+        voice_content_layout = QVBoxLayout(self.voice_content_widget)
+        voice_content_layout.setContentsMargins(0, 4, 0, 0)
+        voice_content_layout.setSpacing(6)
+
+        voice_row = QHBoxLayout()
+        voice_row.setSpacing(10)
+
+        # Voice Audio field
+        v_aud_col = QVBoxLayout()
+        lbl_ref_aud = QLabel("🔊 File Âm Thanh Giọng Mẫu (Reference Audio .wav): *")
+        lbl_ref_aud.setObjectName("InputLabel")
+        voice_aud_box = QHBoxLayout()
+        voice_aud_box.setSpacing(6)
+        self.txt_ref_audio = QLineEdit()
+        self.txt_ref_audio.setObjectName("MasterInput")
+        self.txt_ref_audio.setPlaceholderText("File .wav mẫu...")
+        self.txt_ref_audio.editingFinished.connect(self.save_user_config)
+
+        self.btn_browse_ref_audio = QToolButton()
+        self.btn_browse_ref_audio.setText("📂 Chọn Voice")
+        self.btn_browse_ref_audio.setObjectName("ToolBtn")
+        self.btn_browse_ref_audio.setFixedWidth(90)
+        self.btn_browse_ref_audio.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_browse_ref_audio.clicked.connect(self.browse_ref_audio)
+
+        voice_aud_box.addWidget(self.txt_ref_audio, stretch=1)
+        voice_aud_box.addWidget(self.btn_browse_ref_audio)
+        v_aud_col.addWidget(lbl_ref_aud)
+        v_aud_col.addLayout(voice_aud_box)
+
+        # Voice Text field
+        v_txt_col = QVBoxLayout()
+        lbl_ref_txt = QLabel("📝 Văn Bản Mẫu (Text Transcript của Voice): *")
+        lbl_ref_txt.setObjectName("InputLabel")
+        self.txt_ref_text = QLineEdit()
+        self.txt_ref_text.setObjectName("MasterInput")
+        self.txt_ref_text.setPlaceholderText("Văn bản câu mẫu...")
+        self.txt_ref_text.editingFinished.connect(self.save_user_config)
+        v_txt_col.addWidget(lbl_ref_txt)
+        v_txt_col.addWidget(self.txt_ref_text)
+
+        voice_row.addLayout(v_aud_col, stretch=1)
+        voice_row.addLayout(v_txt_col, stretch=1)
+        voice_content_layout.addLayout(voice_row)
+
+        card_voice_layout.addWidget(self.voice_content_widget)
+        self.voice_content_widget.setVisible(False)
+        top_layout.addWidget(self.card_voice_group)
+
+        top_scroll = QScrollArea()
+        top_scroll.setObjectName("TopScrollArea")
+        top_scroll.setWidgetResizable(True)
+        top_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        top_scroll.setWidget(top_panel)
+
+        splitter.addWidget(top_scroll)
+
+        # ----------------------------------------------------------------------
+        # 4. KHUNG NHẤT THỂ DƯỚI CÙNG: UNIFIED EXECUTION & MONITOR CONSOLE CARD
+        # (TÍCH HỢP TIẾN ĐỘ + CỤM NÚT PHẢI NGOÀI CÙNG + CONSOLE LOG MONITOR)
+        # ----------------------------------------------------------------------
+        unified_console_group = QGroupBox("🖥️ Trung Tâm Điều Khiển & Monitor Nhật Ký Tiến Trình")
+        unified_console_group.setObjectName("ConsoleGroup")
+        unified_console_layout = QVBoxLayout(unified_console_group)
+        unified_console_layout.setContentsMargins(12, 10, 12, 10)
+        unified_console_layout.setSpacing(6)
+
+        # HÀNG TOP TRONG KHUNG DƯỚI: KPI METRICS BÊN TRÁI & NÚT BẤM BÊN PHẢI NGOÀI CÙNG
+        top_control_row = QHBoxLayout()
+        top_control_row.setSpacing(10)
+
+        # KPI Metrics Cards ở bên trái
+        kpi_layout = QHBoxLayout()
+        kpi_layout.setSpacing(8)
+
+        self.card_status = self.create_kpi_card("TRẠNG THÁI", "Đang chờ", "#94a3b8", "kpi_status")
+        self.card_elapsed = self.create_kpi_card("ĐÃ CHẠY", "00:00:00", "#38bdf8", "kpi_elapsed")
+        self.card_eta = self.create_kpi_card("CÒN LẠI", "--:--", "#a78bfa", "kpi_eta")
+        self.card_percent = self.create_kpi_card("TIẾN ĐỘ", "0%", "#10b981", "kpi_percent")
+
+        kpi_layout.addWidget(self.card_status)
+        kpi_layout.addWidget(self.card_elapsed)
+        kpi_layout.addWidget(self.card_eta)
+        kpi_layout.addWidget(self.card_percent)
+        top_control_row.addLayout(kpi_layout)
+
+        top_control_row.addStretch()  # ĐẨY CỤM NÚT SANG BÊN PHẢI NGOÀI CÙNG
+
+        # Cụm Nút Hành Động ở góc bên phải ngoài cùng
+        self.btn_stop = QPushButton("🛑 DỪNG LẠI")
+        self.btn_stop.setObjectName("BtnStop")
+        self.btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setFixedWidth(110)
+        self.btn_stop.setFixedHeight(36)
+        self.btn_stop.clicked.connect(self.on_stop_clicked)
 
         self.btn_pause = QPushButton("⏸️ TẠM DỪNG")
         self.btn_pause.setObjectName("BtnPause")
         self.btn_pause.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_pause.setEnabled(False)
+        self.btn_pause.setFixedWidth(120)
+        self.btn_pause.setFixedHeight(36)
         self.btn_pause.clicked.connect(self.on_pause_clicked)
 
-        self.btn_stop = QPushButton("🛑 DỪNG LẠI")
-        self.btn_stop.setObjectName("BtnStop")
-        self.btn_stop.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self.on_stop_clicked)
+        self.btn_run = QPushButton("▶️ BẮT ĐẦU DỰ ÁN")
+        self.btn_run.setObjectName("BtnRun")
+        self.btn_run.setToolTip("Khởi động tự động toàn bộ quy trình 1-Click!")
+        self.btn_run.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_run.setFixedWidth(165)  # BÊN PHẢI NGOÀI CÙNG
+        self.btn_run.setFixedHeight(36)
+        self.btn_run.clicked.connect(self.on_run_clicked)
 
-        btn_layout.addWidget(self.btn_run, stretch=2)
-        btn_layout.addWidget(self.btn_pause, stretch=1)
-        btn_layout.addWidget(self.btn_stop, stretch=1)
+        top_control_row.addWidget(self.btn_stop)
+        top_control_row.addWidget(self.btn_pause)
+        top_control_row.addWidget(self.btn_run)
 
-        input_layout.addLayout(btn_layout)
-        top_layout.addWidget(input_group)
+        unified_console_layout.addLayout(top_control_row)
 
-        # --- Card 2: Bảng Điều Khiển KPI & Tiến Độ ---
-        progress_group = QGroupBox("📊 Tiến Độ Tải & Chỉ Số Thực Thi")
-        progress_group.setObjectName("ProgressGroup")
-        progress_layout = QVBoxLayout(progress_group)
-        progress_layout.setContentsMargins(18, 16, 18, 16)
-        progress_layout.setSpacing(12)
-
-        kpi_layout = QHBoxLayout()
-        kpi_layout.setSpacing(12)
-
-        self.card_status = self.create_kpi_card("TRẠNG THÁI", "Đang chờ lệnh", "#94a3b8", "kpi_status")
-        self.card_elapsed = self.create_kpi_card("THỜI GIAN ĐÃ CHẠY", "00:00:00", "#38bdf8", "kpi_elapsed")
-        self.card_eta = self.create_kpi_card("DỰ KIẾN CÒN LẠI", "--:--", "#a78bfa", "kpi_eta")
-        self.card_percent = self.create_kpi_card("TIẾN ĐỘ TẢI", "0%", "#10b981", "kpi_percent")
-
-        kpi_layout.addWidget(self.card_status, stretch=2)
-        kpi_layout.addWidget(self.card_elapsed, stretch=1)
-        kpi_layout.addWidget(self.card_eta, stretch=1)
-        kpi_layout.addWidget(self.card_percent, stretch=1)
-
-        progress_layout.addLayout(kpi_layout)
-
+        # HÀNG MID: THANH PROGRESS BAR GẤP ĐÔI ĐỘ DÀY (16PX) CHẠY 100% CHIỀU NGANG
         self.progress_bar = QProgressBar()
         self.progress_bar.setObjectName("CustomProgressBar")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(16)
         self.progress_bar.setTextVisible(False)
+        unified_console_layout.addWidget(self.progress_bar)
 
-        progress_layout.addWidget(self.progress_bar)
-        top_layout.addWidget(progress_group)
-
-        splitter.addWidget(top_panel)
-
-        # === PANEL DƯỚI: CONSOLE LOG ===
-        console_group = QGroupBox("🖥️ Monitor Nhật Ký Tiến Trình (Console Log)")
-        console_group.setObjectName("ConsoleGroup")
-        console_layout = QVBoxLayout(console_group)
-        console_layout.setContentsMargins(16, 14, 16, 14)
-        console_layout.setSpacing(10)
-
+        # HÀNG LỌC LOG TOOLBAR
         console_toolbar = QHBoxLayout()
-        console_toolbar.setSpacing(10)
+        console_toolbar.setSpacing(8)
 
         lbl_filter = QLabel("🔍 Bộ lọc:")
-        lbl_filter.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 12px;")
+        lbl_filter.setStyleSheet("color: #94a3b8; font-weight: bold; font-size: 9.5pt;")
 
         self.cbo_log_level = QComboBox()
         self.cbo_log_level.setObjectName("LogFilterCombo")
@@ -539,11 +932,12 @@ class MainWindowV2(QMainWindow):
         self.txt_log_search.setPlaceholderText("Tìm từ khóa trong log...")
         self.txt_log_search.textChanged.connect(self.filter_logs)
 
-        self.chk_autoscroll = QCheckBox("📌 Cuộn tự động")
+        self.chk_autoscroll = QCheckBox("📌 AutoScroll")
         self.chk_autoscroll.setObjectName("AutoScrollCheck")
         self.chk_autoscroll.setChecked(True)
+        self.chk_autoscroll.toggled.connect(self.save_user_config)
 
-        self.btn_copy_log = QPushButton("📋 Sao chép")
+        self.btn_copy_log = QPushButton("📋 Sao Chép Log")
         self.btn_copy_log.setObjectName("BtnSmall")
         self.btn_copy_log.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_copy_log.clicked.connect(self.copy_logs)
@@ -560,37 +954,52 @@ class MainWindowV2(QMainWindow):
         console_toolbar.addWidget(self.btn_copy_log)
         console_toolbar.addWidget(self.btn_clear_log)
 
+        unified_console_layout.addLayout(console_toolbar)
+
+        # MÀNH HÌNH CONSOLE LOG MONITOR (CHIẾM DIỆN TÍCH CHỦ ĐẠO PHÍA DƯỚI)
         self.txt_console = QTextEdit()
         self.txt_console.setObjectName("ConsoleMonitor")
         self.txt_console.setReadOnly(True)
+        unified_console_layout.addWidget(self.txt_console, stretch=1)
 
-        console_layout.addLayout(console_toolbar)
-        console_layout.addWidget(self.txt_console, stretch=1)
-
-        splitter.addWidget(console_group)
-        splitter.setSizes([340, 360])
+        splitter.addWidget(unified_console_group)
+        
+        # SPLITTER DÀNH KHÔNG GIAN LỚN CHO KHUNG DƯỚI UNIFIED CONSOLE (Top 280px, Bottom 520px)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([280, 520])
 
         main_layout.addWidget(splitter, stretch=1)
 
-        self.append_log("Chào mừng bạn tới GUI V2 PRO! Dán đường dẫn Bilibili để TỰ ĐỘNG TẢI NGAY.", "info")
+        self.refresh_profile_list()
+        self.update_profile_login_status_ui()
+        self.append_log("✨ Chào mừng bạn tới CapCutInjector Pro Studio v3! Đã chuẩn bị sẵn sàng.", "info")
         self.update_cookie_badge_status()
 
     # ==========================================================================
-    # KHỦNG TRỢ GIÚP UI & AUTO DETECT ON PASTE
+    # HELPER UI & EVENT HANDLERS
     # ==========================================================================
+    def toggle_voice_panel(self):
+        self.is_voice_expanded = not self.is_voice_expanded
+        self.voice_content_widget.setVisible(self.is_voice_expanded)
+        if self.is_voice_expanded:
+            self.btn_toggle_voice.setText("▲ Thu Gọn Cấu Hình Voice Mẫu (.wav) & Văn Bản Transcript")
+        else:
+            self.btn_toggle_voice.setText("🔽 Mở Cấu Hình Voice Mẫu (.wav) & Văn Bản Transcript (Bấm để Mở/Đóng)")
+
     def create_kpi_card(self, title: str, initial_value: str, color_hex: str, object_name: str) -> QFrame:
         card = QFrame()
         card.setObjectName("KpiCard")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(2)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(0)
 
         lbl_t = QLabel(title)
         lbl_t.setObjectName("KpiTitle")
 
         lbl_v = QLabel(initial_value)
         lbl_v.setObjectName(object_name)
-        lbl_v.setStyleSheet(f"color: {color_hex}; font-size: 15px; font-weight: bold;")
+        lbl_v.setStyleSheet(f"color: {color_hex}; font-size: 10pt; font-weight: bold;")
 
         layout.addWidget(lbl_t)
         layout.addWidget(lbl_v)
@@ -601,66 +1010,59 @@ class MainWindowV2(QMainWindow):
         if lbl:
             lbl.setText(value_text)
             if color_hex:
-                lbl.setStyleSheet(f"color: {color_hex}; font-size: 15px; font-weight: bold;")
+                lbl.setStyleSheet(f"color: {color_hex}; font-size: 10pt; font-weight: bold;")
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self.on_run_clicked)
         QShortcut(QKeySequence("Ctrl+P"), self).activated.connect(self.on_pause_clicked)
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self.clear_console)
 
+    def set_badge_style(self, label: QLabel, bg_color: str, text_color: str = "white"):
+        label.setStyleSheet(f"background-color: {bg_color}; color: {text_color}; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid {bg_color}; min-height: 28px; max-height: 28px; height: 28px;")
+
     def update_cookie_badge_status(self):
-        # Tự động tạo cấu trúc thư mục cá nhân người dùng
         os.makedirs("./user_data/cookies", exist_ok=True)
-        os.makedirs("./user_data/chrome_profiles", exist_ok=True)
-        os.makedirs("./user_data/config", exist_ok=True)
-        os.makedirs("./user_data/prompts", exist_ok=True)
+        possible_files = ["./user_data/cookies/cookies.txt", "./user_data/cookies.txt", "./cookies.txt"]
+        has_cookie = any(os.path.exists(p) for p in possible_files)
 
-        possible_files = [
-            "./user_data/cookies/cookies.txt",
-            "./user_data/cookies.txt",
-            "./cookie.txt", 
-            "./cookies.txt", 
-            "./downloads/cookie.txt", 
-            "./downloads/cookies.txt"
-        ]
-        has_cookie = False
-        for p in possible_files:
-            if os.path.exists(p):
-                try:
-                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
-                        content = f.read().strip()
-                        if content.startswith("[") and content.endswith("]"):
-                            import json
-                            data = json.loads(content)
-                            netscape_content = "# Netscape HTTP Cookie File\n\n"
-                            for item in data:
-                                name = item.get("name", "")
-                                value = item.get("value", "")
-                                exp = int(item.get("expirationDate", 2147483647))
-                                netscape_content += f".bilibili.com\tTRUE\t/\tFALSE\t{exp}\t{name}\t{value}\n"
-                            
-                            # Lưu vào thư mục cá nhân người dùng user_data/cookies/
-                            with open("./user_data/cookies/cookies.txt", "w", encoding="utf-8") as out:
-                                out.write(netscape_content)
-                            with open("./cookies.txt", "w", encoding="utf-8") as out:
-                                out.write(netscape_content)
-                            has_cookie = True
-                            break
-                        elif "SESSDATA" in content or "bili_jct" in content:
-                            has_cookie = True
-                            break
-                except Exception:
-                    pass
+        if hasattr(self, 'btn_login_bilibili'):
+            if has_cookie:
+                self.btn_login_bilibili.setText("⭐ Bilibili : 1080p")
+                self.btn_login_bilibili.setStyleSheet("background-color: #059669; color: white; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid #10b981; min-height: 28px; max-height: 28px; height: 28px;")
+            else:
+                self.btn_login_bilibili.setText("🍪 Bilibili : Chưa Login")
+                self.btn_login_bilibili.setStyleSheet("background-color: #334155; color: #cbd5e1; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid #475569; min-height: 28px; max-height: 28px; height: 28px;")
 
-        if has_cookie:
-            self.lbl_cookie_badge.setText("🍪 COOKIE VIP: ĐÃ NẠP")
-            self.lbl_cookie_badge.setStyleSheet("background-color: #059669; color: white; font-weight: bold;")
+    def on_auto_detect_capcut(self):
+        detected = get_default_capcut_path()
+        if detected:
+            self.txt_capcut_draft.setText(detected)
+            self.append_log(f"🔍 Đã tự động quét thấy CapCut Draft: {detected}", "success")
+            self.save_user_config()
         else:
-            self.lbl_cookie_badge.setText("🍪 COOKIE: CHƯA CÓ")
-            self.lbl_cookie_badge.setStyleSheet("background-color: #334155; color: #94a3b8; font-weight: bold;")
+            QMessageBox.warning(self, "Không Tìm Thấy CapCut", "Không tự động định vị được thư mục CapCut Draft. Vui lòng bấm 'Chọn Draft' thủ công!")
+
+    def on_ping_gradio(self):
+        url = self.txt_gradio_url.text().strip()
+        if not url:
+            QMessageBox.warning(self, "Thiếu URL Gradio", "Vui lòng nhập đường dẫn Gradio Server trước khi Ping!")
+            return
+        try:
+            res = requests.get(url, timeout=4)
+            if res.status_code in [200, 301, 302]:
+                self.lbl_gradio_status.setText("🟢 Online")
+                self.set_badge_style(self.lbl_gradio_status, "#059669", "white")
+                self.append_log(f"🟢 Server Gradio TTS phản hồi tốt ({url})", "success")
+            else:
+                self.lbl_gradio_status.setText("🔴 Offline")
+                self.set_badge_style(self.lbl_gradio_status, "#dc2626", "white")
+                self.append_log(f"🔴 Server Gradio trả về mã lỗi: {res.status_code}", "error")
+        except Exception as e:
+            self.lbl_gradio_status.setText("🔴 Lỗi Kết Nối")
+            self.set_badge_style(self.lbl_gradio_status, "#dc2626", "white")
+            self.append_log(f"🔴 Không thể kết nối tới Server Gradio: {e}", "error")
 
     def load_user_config(self):
-        """Đọc cấu hình từ user_config.json để tự động hiển thị link và thư mục lưu gần nhất"""
         config_path = "./user_data/config/user_config.json"
         if os.path.exists(config_path):
             try:
@@ -669,327 +1071,291 @@ class MainWindowV2(QMainWindow):
                     cfg = json.load(f)
                 last_url = cfg.get("last_url", "")
                 last_dir = cfg.get("last_dir", "./downloads")
+                last_draft = cfg.get("last_draft", "")
+                last_profile = cfg.get("last_profile", "")
+                last_gradio = cfg.get("last_gradio_url", "")
+                last_ref_aud = cfg.get("last_ref_audio", "")
+                last_ref_txt = cfg.get("last_ref_text", "")
+                enable_tts = cfg.get("enable_tts", True)
+                auto_inject_capcut = cfg.get("auto_inject_capcut", True)
+                autoscroll = cfg.get("autoscroll", True)
+
                 if last_url:
                     self.txt_link.setText(last_url)
                 if last_dir:
                     self.txt_output_dir.setText(last_dir)
-                self.append_log(f"⚙️ Đã nạp cấu hình đã lưu: {last_dir}", "info")
-            except Exception as e:
+                if last_draft:
+                    self.txt_capcut_draft.setText(last_draft)
+                if last_profile and hasattr(self, 'cbo_profile'):
+                    idx = self.cbo_profile.findText(last_profile)
+                    if idx >= 0:
+                        self.cbo_profile.setCurrentIndex(idx)
+                if last_gradio and hasattr(self, 'txt_gradio_url'):
+                    self.txt_gradio_url.setText(last_gradio)
+                if last_ref_aud and hasattr(self, 'txt_ref_audio'):
+                    self.txt_ref_audio.setText(last_ref_aud)
+                if last_ref_txt and hasattr(self, 'txt_ref_text'):
+                    self.txt_ref_text.setText(last_ref_txt)
+                if hasattr(self, 'chk_enable_tts'):
+                    self.chk_enable_tts.setChecked(enable_tts)
+                if hasattr(self, 'chk_auto_inject_capcut'):
+                    self.chk_auto_inject_capcut.setChecked(auto_inject_capcut)
+                if hasattr(self, 'chk_autoscroll'):
+                    self.chk_autoscroll.setChecked(autoscroll)
+
+                self.append_log(f"⚙️ Đã nạp cấu hình đã lưu thành công.", "info")
+            except Exception:
                 pass
 
     def save_user_config(self):
-        """Lưu đường dẫn link và thư mục dự án vào user_config.json"""
         os.makedirs("./user_data/config", exist_ok=True)
         config_path = "./user_data/config/user_config.json"
         try:
             import json
-            current_url = self.txt_link.text().strip()
-            current_dir = self.txt_output_dir.text().strip() or "./downloads"
-
-            cfg = {}
-            if os.path.exists(config_path):
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        cfg = json.load(f)
-                except Exception:
-                    cfg = {}
-
-            history_urls = cfg.get("history_urls", [])
-            history_dirs = cfg.get("history_dirs", [])
-
-            if current_url and current_url not in history_urls:
-                history_urls.insert(0, current_url)
-            if current_dir and current_dir not in history_dirs:
-                history_dirs.insert(0, current_dir)
-
-            cfg["last_url"] = current_url
-            cfg["last_dir"] = current_dir
-            cfg["history_urls"] = history_urls[:20]
-            cfg["history_dirs"] = history_dirs[:20]
-
+            cfg = {
+                "last_url": self.txt_link.text().strip(),
+                "last_dir": self.txt_output_dir.text().strip() or "./downloads",
+                "last_draft": self.txt_capcut_draft.text().strip(),
+                "last_profile": self.get_selected_profile(),
+                "last_gradio_url": self.txt_gradio_url.text().strip(),
+                "last_ref_audio": self.txt_ref_audio.text().strip(),
+                "last_ref_text": self.txt_ref_text.text().strip(),
+                "enable_tts": self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True,
+                "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
+                "autoscroll": self.chk_autoscroll.isChecked() if hasattr(self, 'chk_autoscroll') else True
+            }
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
 
-    def browse_output_directory(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu video tải về")
-        if dir_path:
-            self.txt_output_dir.setText(dir_path)
-            self.append_log(f"📁 Đã đổi thư mục lưu: {dir_path}", "info")
+    def get_selected_profile(self) -> str:
+        if hasattr(self, 'cbo_profile') and self.cbo_profile.currentText():
+            return self.cbo_profile.currentText()
+        return "chrome_data_1"
+
+    def refresh_profile_list(self):
+        current = self.cbo_profile.currentText() if hasattr(self, 'cbo_profile') else ""
+        profiles = get_available_profiles() if get_available_profiles else ["chrome_data_1", "chrome_data_2"]
+        
+        if hasattr(self, 'cbo_profile'):
+            self.cbo_profile.blockSignals(True)
+            self.cbo_profile.clear()
+            self.cbo_profile.addItems(profiles)
+            if current in profiles:
+                self.cbo_profile.setCurrentText(current)
+            self.cbo_profile.blockSignals(False)
+
+    def on_create_profile_clicked(self):
+        if create_new_profile:
+            new_p = create_new_profile()
+            self.append_log(f"✨ Đã tạo Profile Chrome mới: [{new_p}]", "success")
+            self.refresh_profile_list()
+            self.cbo_profile.setCurrentText(new_p)
             self.save_user_config()
 
+    def update_profile_login_status_ui(self):
+        selected_profile = self.get_selected_profile()
+        has_data = is_profile_logged_in(selected_profile) if is_profile_logged_in else False
+        if hasattr(self, 'login_worker') and self.login_worker and self.login_worker.isRunning():
+            return
+        self.btn_login_chrome.setEnabled(True)
+        if has_data:
+            self.btn_login_chrome.setText("🟢 online")
+            self.btn_login_chrome.setStyleSheet("background-color: #059669; color: white; font-weight: bold; border-radius: 6px;")
+        else:
+            self.btn_login_chrome.setText("🔑 Login")
+            self.btn_login_chrome.setStyleSheet("")
+
+    def on_login_chrome_clicked(self):
+        selected_profile = self.get_selected_profile()
+        self.btn_login_chrome.setEnabled(False)
+        self.btn_login_chrome.setText("⏳ Mở Chrome...")
+        self.append_log(f"🔑 Mở Chrome Profile [{selected_profile}] để đăng nhập...", "info")
+
+        self.login_worker = ChromeLoginWorker(selected_profile)
+        self.login_worker.log_signal.connect(self.append_log)
+        def on_login_finished(success, msg):
+            self.update_profile_login_status_ui()
+            if success:
+                self.append_log(f"🎉 {msg}", "success")
+            else:
+                self.append_log(f"⚠️ {msg}", "warning")
+        self.login_worker.finished_signal.connect(on_login_finished)
+        self.login_worker.start()
+
+    def browse_ref_audio(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Chọn file Voice Mẫu", self.txt_output_dir.text().strip(), "Tệp Âm thanh (*.wav *.mp3 *.flac);;Tất cả (*.*)")
+        if f:
+            self.txt_ref_audio.setText(f)
+            self.save_user_config()
+
+    def browse_smart_input_file(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Chọn tệp Đầu vào", self.txt_output_dir.text().strip(), "Tệp Đầu Vào (*.mp4 *.mkv *.avi *.mp3 *.wav *.srt);;Tất cả (*.*)")
+        if f:
+            self.txt_link.setText(f)
+
+    def browse_capcut_draft(self):
+        d = QFileDialog.getExistingDirectory(self, "Chọn thư mục CapCut PC Draft", self.txt_capcut_draft.text().strip())
+        if d:
+            self.txt_capcut_draft.setText(d)
+            self.save_user_config()
+
+    def browse_output_directory(self):
+        dir_path = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu dự án")
+        if dir_path:
+            self.txt_output_dir.setText(dir_path)
+            self.save_user_config()
+
+    def open_output_directory(self):
+        dir_path = os.path.abspath(self.txt_output_dir.text().strip() or "./downloads")
+        os.makedirs(dir_path, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(dir_path))
+
     def paste_link_only(self):
-        """Chỉ dán link vào ô nhập liệu mà KHÔNG tự động chạy tiến trình"""
         clipboard = QApplication.clipboard()
-        raw_text = clipboard.text().strip()
-        if not raw_text:
-            return
+        text = clipboard.text().strip()
+        if text:
+            self.txt_link.setText(text)
 
-        clean_url = BilibiliDownloader.extract_bilibili_url(raw_text) if BilibiliDownloader else None
-        target_url = clean_url if clean_url else raw_text
-        self.txt_link.setText(target_url)
-        self.append_log(f"📋 Đã dán link Bilibili: {target_url}", "info")
-        self.save_user_config()
+    def paste_gradio_url(self):
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip()
+        if text:
+            self.txt_gradio_url.setText(text)
+            self.save_user_config()
 
-    def update_timer_display(self):
-        if self.start_timestamp:
-            elapsed_sec = int(time.time() - self.start_timestamp)
-            hours, remainder = divmod(elapsed_sec, 3600)
-            minutes, seconds = divmod(remainder, 60)
-            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            self.update_kpi_value("kpi_elapsed", time_str, "#38bdf8")
+    def on_login_bilibili_clicked(self):
+        if hasattr(self, 'btn_login_bilibili'):
+            self.btn_login_bilibili.setEnabled(False)
+        self.append_log("🚀 Khởi chạy cửa sổ đăng nhập Bilibili...", "info")
+        self.bilibili_login_worker = BilibiliLoginWorker()
+        self.bilibili_login_worker.log_signal.connect(self.append_log)
+        self.bilibili_login_worker.finished_signal.connect(self.on_bilibili_login_finished)
+        self.bilibili_login_worker.start()
 
-    # ==========================================================================
-    # CÁC HÀM XỬ LÝ SỰ KIỆN NÚT BẤM (SLOTS)
-    # ==========================================================================
+    def on_bilibili_login_finished(self, success: bool, message: str):
+        if hasattr(self, 'btn_login_bilibili'):
+            self.btn_login_bilibili.setEnabled(True)
+        if success:
+            QMessageBox.information(self, "Đăng Nhập Thành Công 🎉", message)
+        else:
+            QMessageBox.warning(self, "Đăng Nhập Thất Bại ⚠️", f"Không thể lưu Cookie Bilibili: {message}")
+
+    # ── VALIDATION & LOGIC CHẠY TỰ ĐỘNG ──
     def on_run_clicked(self):
-        raw_input = self.txt_link.text().strip()
-        if not raw_input:
-            QMessageBox.warning(
-                self, "Cảnh Báo Dữ Liệu", 
-                "⚠️ Vui lòng nhập hoặc dán đường dẫn Link Bilibili trước khi tải!"
-            )
-            self.txt_link.setFocus()
+        self.txt_link.setStyleSheet("")
+        self.txt_output_dir.setStyleSheet("")
+        self.txt_capcut_draft.setStyleSheet("")
+        self.txt_gradio_url.setStyleSheet("")
+        self.txt_ref_audio.setStyleSheet("")
+        self.txt_ref_text.setStyleSheet("")
+
+        link = self.txt_link.text().strip()
+        out_dir = self.txt_output_dir.text().strip()
+        draft = self.txt_capcut_draft.text().strip()
+        gradio = self.txt_gradio_url.text().strip()
+        ref_aud = self.txt_ref_audio.text().strip()
+        ref_txt = self.txt_ref_text.text().strip()
+        enable_tts = self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True
+
+        missing_fields = []
+        if not link:
+            self.txt_link.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
+            missing_fields.append("Nguồn đầu vào (Link / File)")
+        if not out_dir:
+            self.txt_output_dir.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
+            missing_fields.append("Thư mục dự án")
+        if self.chk_auto_inject_capcut.isChecked() and not draft:
+            self.txt_capcut_draft.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
+            missing_fields.append("Đường dẫn CapCut Draft")
+
+        if enable_tts:
+            if not gradio:
+                self.txt_gradio_url.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
+                missing_fields.append("Gradio Server URL")
+            if not ref_aud:
+                self.txt_ref_audio.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
+                missing_fields.append("File Voice Mẫu (.wav)")
+            if not ref_txt:
+                self.txt_ref_text.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
+                missing_fields.append("Văn bản Voice Mẫu")
+
+        if missing_fields:
+            msg = "Vui lòng bổ sung các thông tin bắt buộc sau trước khi bấm BẮT ĐẦU:\n\n• " + "\n• ".join(missing_fields)
+            QMessageBox.warning(self, "Thiếu Thông Tin Bắt Buộc ⚠️", msg)
             return
 
-        clean_url = BilibiliDownloader.extract_bilibili_url(raw_input) if BilibiliDownloader else None
-        if not clean_url and not BilibiliDownloader.is_valid_bilibili_url(raw_input):
-            QMessageBox.warning(
-                self, "Cảnh Báo Dữ Liệu", 
-                "⚠️ Ô nhập liệu không chứa đường dẫn Link Bilibili hợp lệ!"
-            )
-            self.txt_link.setFocus()
-            return
-
-        target_url = clean_url if clean_url else raw_input
-
-        # Đang chạy thì không bấm trùng
-        if self.worker and self.worker.isRunning():
-            return
-
-        out_dir = self.txt_output_dir.text().strip() or "./downloads"
-
-        # Lưu cấu hình sử dụng gần nhất
         self.save_user_config()
 
-        # Cập nhật UI State
+        local_media = None
+        srt_translate = None
+        target_url = ""
+
+        if link.startswith("http://") or link.startswith("https://"):
+            target_url = link
+        elif os.path.exists(link):
+            if link.lower().endswith(".srt"):
+                srt_translate = link
+            else:
+                local_media = link
+        else:
+            target_url = link
+
         self.btn_run.setEnabled(False)
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
-        self.txt_link.setEnabled(False)
-        self.btn_paste_link.setEnabled(False)
-        self.btn_clear_link.setEnabled(False)
-
-        self.btn_pause.setText("⏸️ TẠM DỪNG")
-        self.btn_pause.setProperty("class", "")
-        self.style().unpolish(self.btn_pause)
-        self.style().polish(self.btn_pause)
-        self.is_paused = False
 
         self.progress_bar.setValue(0)
         self.update_kpi_value("kpi_percent", "0%", "#10b981")
-        self.update_kpi_value("kpi_status", "Đang kết nối ⚡", "#6366f1")
+        self.update_kpi_value("kpi_status", "Đang xử lý ⚡", "#6366f1")
         self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
-        self.update_kpi_value("kpi_eta", "Tự động...", "#a78bfa")
-        
-        self.lbl_system_badge.setText("⚡ ĐANG TẢI")
-        self.lbl_system_badge.setStyleSheet("background-color: #0284c7; color: white;")
+
+        self.lbl_system_badge.setText("⚡ CHẠY TỰ ĐỘNG")
+        self.set_badge_style(self.lbl_system_badge, "#0284c7", "white")
 
         self.start_timestamp = time.time()
         self.timer.start()
 
-        # Khởi chạy Worker Thread
-        self.worker = ProcessWorker(target_url, output_dir=out_dir)
-        self.worker.log_signal.connect(self.append_log)
-        self.worker.progress_signal.connect(self.update_progress)
-        self.worker.finished_signal.connect(self.on_process_finished)
-        self.worker.start()
-
-    def on_select_file_for_srt(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn file Video hoặc Audio để Tạo Phụ Đề SRT",
-            "",
-            "Tệp Media (*.mp4 *.mkv *.m4v *.mov *.avi *.mp3 *.wav *.m4a);;Tất cả tệp (*.*)"
+        self.worker = ProcessWorker(
+            link=target_url,
+            output_dir=out_dir,
+            local_media_path=local_media,
+            srt_translate_path=srt_translate,
+            profile_folder=self.get_selected_profile(),
+            auto_inject_capcut=self.chk_auto_inject_capcut.isChecked(),
+            capcut_draft_path=draft,
+            enable_tts=enable_tts,
+            gradio_url=gradio,
+            ref_audio_path=ref_aud,
+            ref_text=ref_txt
         )
-        if not file_path:
-            return
-
-        out_dir = self.txt_output_dir.text().strip() or "./downloads"
-
-        # Cập nhật UI State
-        self.btn_run.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_stop.setEnabled(True)
-
-        self.progress_bar.setValue(0)
-        self.update_kpi_value("kpi_percent", "0%", "#10b981")
-        self.update_kpi_value("kpi_status", "Đang phân tích 🎙️", "#6366f1")
-        self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
-        
-        self.lbl_system_badge.setText("🎙️ TẠO SRT")
-        self.lbl_system_badge.setStyleSheet("background-color: #7c3aed; color: white;")
-
-        self.start_timestamp = time.time()
-        self.timer.start()
-
-        self.worker = ProcessWorker(link="", output_dir=out_dir, local_media_path=file_path)
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_progress)
-        self.worker.finished_signal.connect(self.on_process_finished)
-        self.worker.start()
-
-    def on_select_srt_for_translation(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Chọn tệp Phụ Đề SRT Tiếng Trung/Anh để Dịch Sang Tiếng Việt",
-            "",
-            "Tệp Phụ Đề (*.srt);;Tất cả tệp (*.*)"
-        )
-        if not file_path:
-            return
-
-        out_dir = self.txt_output_dir.text().strip() or "./downloads"
-
-        # Cập nhật UI State
-        self.btn_run.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_stop.setEnabled(True)
-
-        self.progress_bar.setValue(0)
-        self.update_kpi_value("kpi_percent", "0%", "#10b981")
-        self.update_kpi_value("kpi_status", "Đang dịch AI 🌐", "#6366f1")
-        self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
-        
-        self.lbl_system_badge.setText("🌐 DỊCH AI")
-        self.lbl_system_badge.setStyleSheet("background-color: #059669; color: white;")
-
-        self.start_timestamp = time.time()
-        self.timer.start()
-
-        self.worker = ProcessWorker(link="", output_dir=out_dir, srt_translate_path=file_path)
-        self.worker.log_signal.connect(self.append_log)
-        self.worker.progress_signal.connect(self.update_progress)
-        self.worker.finished_signal.connect(self.on_process_finished)
-        self.worker.start()
-
-    def on_qa_scan_clicked(self):
-        """Xử lý sự kiện bấm nút QUÉT LỖI QA: Hỗ trợ chọn 1 Tệp lẻ hoặc Cả Thư Mục"""
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Lựa Chọn Phạm Vi Quét QA")
-        msg_box.setText("Bạn muốn quét phân tích lỗi QA cho 1 Tệp đơn lẻ hay Cả Thư Mục?")
-        btn_file = msg_box.addButton("📄 Chọn 1 Tệp SRT", QMessageBox.ButtonRole.ActionRole)
-        btn_folder = msg_box.addButton("📁 Chọn Cả Thư Mục SRT", QMessageBox.ButtonRole.ActionRole)
-        btn_cancel = msg_box.addButton("Hủy", QMessageBox.ButtonRole.RejectRole)
-        msg_box.exec()
-
-        target_path = None
-        if msg_box.clickedButton() == btn_file:
-            target_path, _ = QFileDialog.getOpenFileName(
-                self,
-                "Chọn Tệp SRT Tiếng Việt để Quét Lỗi QA",
-                self.txt_output_dir.text().strip() or "./downloads",
-                "Subtitle Files (*.srt);;All Files (*)"
-            )
-        elif msg_box.clickedButton() == btn_folder:
-            target_path = QFileDialog.getExistingDirectory(
-                self,
-                "Chọn Thư Mục Chứa Các Tệp SRT Tiếng Việt để Quét Hàng Loạt",
-                self.txt_output_dir.text().strip() or "./downloads"
-            )
-
-        if not target_path:
-            return
-
-        out_dir = self.txt_output_dir.text().strip() or "./downloads"
-        self.progress_bar.setValue(0)
-
-        self.btn_run.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_stop.setEnabled(True)
-
-        self.update_kpi_value("kpi_percent", "0%", "#10b981")
-        self.update_kpi_value("kpi_status", "Quét QA 🔍", "#6366f1")
-        self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
-        
-        self.lbl_system_badge.setText("🔍 QUÉT QA")
-        self.lbl_system_badge.setStyleSheet("background-color: #0284c7; color: white;")
-
-        self.start_timestamp = time.time()
-        self.timer.start()
-
-        self.worker = ProcessWorker(link="", output_dir=out_dir, qa_scan_path=target_path)
-        self.worker.log_signal.connect(self.append_log)
-        self.worker.progress_signal.connect(self.update_progress)
-        self.worker.finished_signal.connect(self.on_process_finished)
-        self.worker.start()
-
-    def on_qa_repair_clicked(self):
-        """Xử lý sự kiện bấm nút VÁ LỖI QA (AI)"""
-        out_dir = self.txt_output_dir.text().strip() or "./downloads"
-        self.progress_bar.setValue(0)
-
-        self.btn_run.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_stop.setEnabled(True)
-
-        self.update_kpi_value("kpi_percent", "0%", "#10b981")
-        self.update_kpi_value("kpi_status", "Vá QA 🩺", "#6366f1")
-        self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
-        
-        self.lbl_system_badge.setText("🩺 VÁ LỖI QA")
-        self.lbl_system_badge.setStyleSheet("background-color: #9333ea; color: white;")
-
-        self.start_timestamp = time.time()
-        self.timer.start()
-
-        self.worker = ProcessWorker(link="", output_dir=out_dir, qa_repair_mode=True)
-        self.worker.log_signal.connect(self.append_log)
-        self.worker.progress_signal.connect(self.update_progress)
+        self.worker.step_signal.connect(self.stepper_widget.set_step)
         self.worker.finished_signal.connect(self.on_process_finished)
         self.worker.start()
 
     def on_pause_clicked(self):
         if not self.worker or not self.worker.isRunning():
             return
-
         if not self.is_paused:
             self.worker.pause()
             self.is_paused = True
             self.timer.stop()
             self.btn_pause.setText("▶️ TIẾP TỤC")
-            self.btn_pause.setProperty("class", "resume")
-            self.style().unpolish(self.btn_pause)
-            self.style().polish(self.btn_pause)
-            
             self.update_kpi_value("kpi_status", "ĐÃ TẠM DỪNG ⏸️", "#f59e0b")
-            self.lbl_system_badge.setText("⏸️ TẠM DỪNG")
-            self.lbl_system_badge.setStyleSheet("background-color: #d97706; color: white;")
         else:
             self.worker.resume()
             self.is_paused = False
             self.timer.start()
             self.btn_pause.setText("⏸️ TẠM DỪNG")
-            self.btn_pause.setProperty("class", "")
-            self.style().unpolish(self.btn_pause)
-            self.style().polish(self.btn_pause)
-            
-            self.update_kpi_value("kpi_status", "Đang tải ⚡", "#6366f1")
-            self.lbl_system_badge.setText("⚡ ĐANG TẢI")
-            self.lbl_system_badge.setStyleSheet("background-color: #0284c7; color: white;")
+            self.update_kpi_value("kpi_status", "Đang xử lý ⚡", "#6366f1")
 
     def on_stop_clicked(self):
         if self.worker and self.worker.isRunning():
-            reply = QMessageBox.question(
-                self, "Xác Nhận Dừng Tải", 
-                "🛑 Bạn có chắc chắn muốn DỪNG TOÀN BỘ tiến trình tải video đang chạy?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
+            reply = QMessageBox.question(self, "Xác Nhận Dừng", "🛑 Bạn có chắc chắn muốn DỪNG tiến trình?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
-                self.btn_stop.setEnabled(False)
-                self.btn_pause.setEnabled(False)
                 self.worker.stop()
 
     def on_process_finished(self, success: bool, message: str):
@@ -997,292 +1363,341 @@ class MainWindowV2(QMainWindow):
         self.btn_run.setEnabled(True)
         self.btn_pause.setEnabled(False)
         self.btn_stop.setEnabled(False)
-        self.txt_link.setEnabled(True)
-        self.btn_paste_link.setEnabled(True)
-        self.btn_clear_link.setEnabled(True)
-        
-        self.btn_pause.setText("⏸️ TẠM DỪNG")
         self.is_paused = False
 
         if success:
             self.update_kpi_value("kpi_status", "HOÀN THÀNH 🎉", "#10b981")
             self.update_kpi_value("kpi_percent", "100%", "#10b981")
             self.lbl_system_badge.setText("✅ HOÀN THÀNH")
-            self.lbl_system_badge.setStyleSheet("background-color: #059669; color: white;")
+            self.set_badge_style(self.lbl_system_badge, "#059669", "white")
             self.append_log(f"SUCCESS: {message}", "success")
         else:
-            self.update_kpi_value("kpi_status", "ĐÃ HỦY / LỖI 🛑", "#ef4444")
-            self.lbl_system_badge.setText("🛑 ĐÃ DỪNG")
-            self.lbl_system_badge.setStyleSheet("background-color: #dc2626; color: white;")
-            self.append_log(f"STOPPED: {message}", "error")
+            self.update_kpi_value("kpi_status", "THẤT BẠI ❌", "#ef4444")
+            self.lbl_system_badge.setText("❌ LỖI")
+            self.set_badge_style(self.lbl_system_badge, "#dc2626", "white")
 
-    def update_progress(self, percentage: int, status_text: str):
-        if percentage >= 0:
-            self.progress_bar.setValue(percentage)
-            self.update_kpi_value("kpi_percent", f"{percentage}%", "#10b981")
-            self.update_kpi_value("kpi_status", status_text, "#38bdf8")
+    def update_progress(self, pct: int, status: str):
+        if pct >= 0:
+            self.progress_bar.setValue(pct)
+            self.update_kpi_value("kpi_percent", f"{pct}%", "#10b981")
+        self.update_kpi_value("kpi_status", status, "#38bdf8")
 
-    # ==========================================================================
-    # CÁC XỬ LÝ LOG CONSOLE
-    # ==========================================================================
-    def append_log(self, message: str, level: str = "info"):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.logs_history.append((timestamp, message, level))
-        self.render_single_log(timestamp, message, level)
+    def update_timer_display(self):
+        if self.start_timestamp:
+            elapsed_sec = int(time.time() - self.start_timestamp)
+            mins, secs = divmod(elapsed_sec, 60)
+            hours, mins = divmod(mins, 60)
+            time_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
+            self.update_kpi_value("kpi_elapsed", time_str, "#38bdf8")
 
-    def render_single_log(self, timestamp: str, message: str, level: str):
-        colors = {
-            "info": "#94a3b8",      
-            "success": "#10b981",   
-            "warning": "#f59e0b",   
-            "error": "#ef4444"      
+    def append_log(self, msg: str, level: str = "info"):
+        timestamp = datetime.now().strftime("[%H:%M:%S]")
+        self.logs_history.append((timestamp, level, msg))
+
+        color_map = {
+            "info": "#93c5fd",
+            "success": "#34d399",
+            "warning": "#fbbf24",
+            "error": "#fca5a5"
         }
-        color = colors.get(level, "#94a3b8")
-        formatted_html = f'<span style="color: #475569; font-size: 11px;">[{timestamp}]</span> <span style="color: {color}; font-weight: 500;">{message}</span>'
-        self.txt_console.append(formatted_html)
+        color = color_map.get(level.lower(), "#e2e8f0")
+        formatted = f'<span style="color: #64748b;">{timestamp}</span> <span style="color: {color}; font-weight: 500;">{msg}</span>'
 
+        self.txt_console.append(formatted)
         if self.chk_autoscroll.isChecked():
-            cursor = self.txt_console.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            self.txt_console.setTextCursor(cursor)
+            self.txt_console.moveCursor(QTextCursor.MoveOperation.End)
 
     def filter_logs(self):
-        filter_level_idx = self.cbo_log_level.currentIndex()
-        search_kw = self.txt_log_search.text().strip().lower()
-
-        level_map = {1: "info", 2: "success", 3: "warning", 4: "error"}
-        target_level = level_map.get(filter_level_idx, None)
+        query = self.txt_log_search.text().strip().lower()
+        level_filter = self.cbo_log_level.currentText()
 
         self.txt_console.clear()
-        for ts, msg, lvl in self.logs_history:
-            if target_level and lvl != target_level:
-                continue
-            if search_kw and search_kw not in msg.lower():
-                continue
-            self.render_single_log(ts, msg, lvl)
+        for ts, lvl, msg in self.logs_history:
+            if level_filter == "ℹ️ Info" and lvl != "info": continue
+            if level_filter == "✅ Success" and lvl != "success": continue
+            if level_filter == "⚠️ Warning" and lvl != "warning": continue
+            if level_filter == "❌ Error" and lvl != "error": continue
+            if query and query not in msg.lower(): continue
 
-    def copy_logs(self):
-        text = self.txt_console.toPlainText()
-        if text:
-            QApplication.clipboard().setText(text)
-            self.append_log("📋 Đã sao chép toàn bộ nội dung nhật ký log vào Clipboard.", "info")
+            color = {"info": "#93c5fd", "success": "#34d399", "warning": "#fbbf24", "error": "#fca5a5"}.get(lvl, "#e2e8f0")
+            formatted = f'<span style="color: #64748b;">{ts}</span> <span style="color: {color}; font-weight: 500;">{msg}</span>'
+            self.txt_console.append(formatted)
 
     def clear_console(self):
         self.logs_history.clear()
         self.txt_console.clear()
-        self.append_log("Đã xóa toàn bộ nhật ký hệ thống.", "info")
+
+    def copy_logs(self):
+        plain_text = self.txt_console.toPlainText()
+        if plain_text:
+            QApplication.clipboard().setText(plain_text)
+            QMessageBox.information(self, "Đã Sao Chép", "Đã sao chép toàn bộ nhật ký Log vào Clipboard!")
 
     # ==========================================================================
-    # DESIGN SYSTEM STYLESHEET (DARK GLASSMORPHISM MODERN THEME)
+    # CENTRALIZED STYLESHEET (V7 UNIFIED SYSTEM)
     # ==========================================================================
     def setup_stylesheet(self):
         qss = """
         QMainWindow {
-            background-color: #090d16;
-            font-family: 'Segoe UI', -apple-system, Roboto, sans-serif;
+            background-color: #0b0f17;
         }
-
-        QSplitter::handle {
-            background-color: #1e293b;
-            height: 6px;
-            margin: 2px 0;
-            border-radius: 3px;
-        }
-        QSplitter::handle:hover {
-            background-color: #38bdf8;
+        QWidget {
+            font-family: 'Segoe UI Variable', 'Segoe UI', 'Inter', sans-serif;
+            color: #f8fafc;
         }
 
         #HeaderFrame {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1e293b, stop:1 #0f172a);
-            border: 1px solid #334155;
-            border-radius: 12px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #161f30, stop:1 #0f172a);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
         }
         #MainTitle {
-            color: #f8fafc;
-            font-size: 17px;
+            color: #38bdf8;
+            font-size: 12pt;
             font-weight: 800;
+            letter-spacing: 0.5px;
         }
         #SubTitle {
             color: #94a3b8;
-            font-size: 12px;
-        }
-        #SystemBadge {
-            background-color: #059669;
-            color: white;
-            font-size: 11px;
-            font-weight: bold;
-            padding: 6px 14px;
-            border-radius: 14px;
+            font-size: 9.5pt;
         }
 
         QGroupBox {
-            color: #38bdf8;
-            font-size: 13px;
-            font-weight: 700;
-            background-color: #131c2e;
-            border: 1px solid #1e293b;
-            border-radius: 12px;
+            background-color: #161f30;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
             margin-top: 8px;
+            font-size: 10pt;
+            font-weight: 700;
+            color: #38bdf8;
+            padding-top: 14px;
         }
         QGroupBox::title {
             subcontrol-origin: margin;
-            left: 14px;
-            padding: 0 8px;
-            color: #38bdf8;
+            subcontrol-position: top left;
+            left: 12px;
+            padding: 0 6px;
+            background-color: #161f30;
+        }
+
+        #MasterCardVoice {
+            background-color: #161f30;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            margin-top: 2px;
+            padding-top: 2px;
+            padding-bottom: 2px;
         }
 
         #InputLabel {
-            color: #e2e8f0;
-            font-size: 13px;
+            color: #cbd5e1;
             font-weight: 600;
+            font-size: 10pt;
         }
-        #LinkInput, #DirInput {
-            background-color: #090d16;
+        #MasterInput {
+            background-color: #0b0f17;
             color: #f8fafc;
             border: 1px solid #334155;
-            border-radius: 8px;
-            padding: 9px 12px;
-            font-size: 13px;
+            border-radius: 5px;
+            padding: 0 10px;
+            font-size: 9.5pt;
+            min-height: 30px;
+            max-height: 30px;
+            height: 30px;
         }
-        #LinkInput:focus {
-            border: 1px solid #38bdf8;
-            background-color: #0f172a;
+        #MasterInput:focus {
+            border: 1.5px solid #38bdf8;
+            background-color: #030712;
         }
 
         #ToolBtn {
             background-color: #1e293b;
-            color: #cbd5e1;
+            color: #e2e8f0;
             border: 1px solid #334155;
-            border-radius: 6px;
-            padding: 6px 10px;
-            font-size: 12px;
+            border-radius: 5px;
+            padding: 0 8px;
+            font-size: 9.5pt;
             font-weight: 600;
+            min-height: 28px;
+            max-height: 28px;
+            height: 28px;
         }
         #ToolBtn:hover {
             background-color: #334155;
             color: white;
+            border-color: #475569;
         }
-
         #ToolBtnAccent {
-            background-color: #0284c7;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #0ea5e9);
             color: white;
             border: 1px solid #38bdf8;
-            border-radius: 6px;
-            padding: 6px 12px;
-            font-size: 12px;
+            border-radius: 5px;
+            padding: 0 8px;
+            font-size: 9.5pt;
             font-weight: 700;
+            min-height: 28px;
+            max-height: 28px;
+            height: 28px;
         }
         #ToolBtnAccent:hover {
-            background-color: #0369a1;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0ea5e9, stop:1 #38bdf8);
         }
 
-        QPushButton {
-            font-size: 13px;
-            font-weight: 700;
+        #ExpanderBtn {
+            background-color: #1a2436;
+            color: #38bdf8;
+            border: 1px dashed #334155;
             border-radius: 8px;
-            padding: 10px 22px;
-            border: none;
+            padding: 5px 12px;
+            font-size: 9.5pt;
+            font-weight: 600;
+            text-align: left;
+        }
+        #ExpanderBtn:hover {
+            background-color: #1e293b;
+            border-color: #38bdf8;
             color: white;
+        }
+
+        #AccentCheck {
+            color: #38bdf8;
+            font-weight: 700;
+            font-size: 9.5pt;
+        }
+        #PurpleCheck {
+            color: #a78bfa;
+            font-weight: 700;
+            font-size: 9.5pt;
         }
 
         #BtnRun {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #059669, stop:1 #10b981);
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:0.5 #2563eb, stop:1 #4f46e5);
+            border: 1px solid #60a5fa;
+            border-radius: 8px;
+            color: white;
+            font-size: 10.5pt;
+            font-weight: 800;
+            min-height: 36px;
+            max-height: 38px;
         }
         #BtnRun:hover {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #34d399);
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0369a1, stop:0.5 #1d4ed8, stop:1 #4338ca);
+            border-color: #93c5fd;
         }
         #BtnRun:disabled {
             background-color: #1e293b;
             color: #475569;
+            border: 1px solid #334155;
         }
 
         #BtnPause {
-            background-color: #d97706;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #d97706, stop:1 #f59e0b);
+            border: 1px solid #fbbf24;
+            border-radius: 8px;
+            color: white;
+            font-weight: 700;
+            font-size: 10pt;
+            min-height: 36px;
+            max-height: 38px;
         }
         #BtnPause:hover {
-            background-color: #f59e0b;
-        }
-        #BtnPause[class="resume"] {
-            background-color: #2563eb;
-        }
-        #BtnPause[class="resume"]:hover {
-            background-color: #3b82f6;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #f59e0b, stop:1 #fbbf24);
         }
         #BtnPause:disabled {
             background-color: #1e293b;
             color: #475569;
+            border: 1px solid #334155;
         }
 
         #BtnStop {
-            background-color: #dc2626;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #f43f5e);
+            border: 1px solid #f87171;
+            border-radius: 8px;
+            color: white;
+            font-weight: 700;
+            font-size: 10pt;
+            min-height: 36px;
+            max-height: 38px;
         }
         #BtnStop:hover {
-            background-color: #ef4444;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ef4444, stop:1 #fb7185);
         }
         #BtnStop:disabled {
             background-color: #1e293b;
             color: #475569;
-        }
-
-        #BtnSmall {
-            background-color: #1e293b;
-            color: #cbd5e1;
-            font-size: 11px;
-            font-weight: 600;
-            padding: 6px 12px;
-            border-radius: 6px;
             border: 1px solid #334155;
-        }
-        #BtnSmall:hover {
-            background-color: #334155;
-            color: white;
         }
 
         #KpiCard {
-            background-color: #090d16;
-            border: 1px solid #1e293b;
-            border-radius: 8px;
+            background-color: #0f172a;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 6px;
         }
         #KpiTitle {
-            color: #64748b;
-            font-size: 10px;
+            color: #94a3b8;
+            font-size: 8.5pt;
             font-weight: 700;
             letter-spacing: 0.5px;
         }
 
         #CustomProgressBar {
-            background-color: #090d16;
-            border: 1px solid #1e293b;
+            background-color: #0f172a;
+            border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 8px;
-            height: 14px;
-            text-align: center;
+            height: 16px;
         }
         #CustomProgressBar::chunk {
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #6366f1, stop:0.5 #38bdf8, stop:1 #10b981);
-            border-radius: 6px;
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:0.5 #06b6d4, stop:1 #10b981);
+            border-radius: 8px;
         }
 
         #LogFilterCombo, #LogSearchInput {
-            background-color: #090d16;
-            color: #e2e8f0;
+            background-color: #0b0f17;
+            color: #f8fafc;
             border: 1px solid #334155;
             border-radius: 6px;
-            padding: 4px 8px;
-            font-size: 12px;
+            padding: 2px 8px;
+            font-size: 9.5pt;
+            min-height: 28px;
         }
-        #AutoScrollCheck {
-            color: #94a3b8;
-            font-size: 12px;
+
+        #ProfileCombo {
+            background-color: #0b0f17;
+            color: #f8fafc;
+            border: 1px solid #334155;
+            border-radius: 5px;
+            padding: 0 6px 0 8px;
+            font-size: 9.5pt;
+            min-height: 28px;
+            max-height: 28px;
+            height: 28px;
         }
 
         #ConsoleMonitor {
             background-color: #050811;
-            color: #94a3b8;
+            color: #e2e8f0;
             font-family: 'Consolas', 'Fira Code', 'Courier New', monospace;
-            font-size: 12px;
-            border: 1px solid #1e293b;
+            font-size: 10pt;
+            border: 1px solid rgba(255, 255, 255, 0.08);
             border-radius: 8px;
             padding: 10px;
+        }
+
+        QScrollBar:vertical {
+            background: #0b0f17;
+            width: 8px;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:vertical {
+            background: #334155;
+            min-height: 20px;
+            border-radius: 4px;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #475569;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
         }
         """
         self.setStyleSheet(qss)
@@ -1293,6 +1708,8 @@ class MainWindowV2(QMainWindow):
 # ==============================================================================
 def main():
     app = QApplication(sys.argv)
+    from PyQt6.QtGui import QFont
+    app.setFont(QFont("Segoe UI", 10))
     window = MainWindowV2()
     window.show()
     sys.exit(app.exec())

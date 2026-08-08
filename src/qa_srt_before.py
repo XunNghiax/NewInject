@@ -312,12 +312,15 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
     )
 
     try:
-        out_dir = os.path.dirname(output_filename)
-        
-        # Trích xuất tên folder cuối cùng từ đường dẫn
-        # VD: "C:/Videos/Tap_01" -> Lấy ra "Tap_01"
-        folder_name = os.path.basename(out_dir) if out_dir else "Report"
-        
+        _, ext = os.path.splitext(output_filename)
+        if ext:
+            out_dir = os.path.dirname(output_filename)
+            folder_name = os.path.basename(out_dir) if out_dir else "Report"
+        else:
+            out_dir = output_filename
+            folder_name = os.path.basename(output_filename)
+            ext = ".txt"
+
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
             # Dọn dẹp các file report cũ trước khi lưu báo cáo mới
@@ -327,9 +330,6 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
                         os.remove(os.path.join(out_dir, old_f))
                     except Exception:
                         pass
-
-        _, ext = os.path.splitext(output_filename)
-        if not ext: ext = ".txt" # Đảm bảo luôn có đuôi file
         
         timestamp_str  = datetime.now().strftime("%Y-%m-%d %H:%M")
 

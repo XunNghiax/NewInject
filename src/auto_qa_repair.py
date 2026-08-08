@@ -7,7 +7,10 @@ from src.gemini_core import (
     clean_gemini_output,
     countdown_sleep,
     resolve_profile_path,
-    get_available_profiles
+    get_available_profiles,
+    record_profile_cooldown,
+    is_profile_in_cooldown,
+    get_next_available_pro_profile
 )
 from src.gemini_translate import (
     send_initial_prompt,
@@ -119,27 +122,25 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
             status, model_name = check_model_status(page, log_callback)
             if status == "FLASH_LITE":
                 log_callback(f"⚠️ Profile [{current_profile}] bị hạ cấp xuống Flash-Lite! Tự động chuyển Profile còn hạn mức Pro...", "warning")
+                record_profile_cooldown(current_profile, 5.0, log_callback)
+                
+                next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
                 switched_ok = False
-                start_idx = current_profile_idx
-                while True:
-                    current_profile_idx = (current_profile_idx + 1) % len(available_profiles)
-                    if current_profile_idx == start_idx:
-                        break
-                    next_profile = available_profiles[current_profile_idx]
-                    log_callback(f"🔄 TỰ ĐỘNG CHUYỂN SANG PROFILE TIẾP THEO: [{next_profile}]...", "info")
+                if next_p:
+                    log_callback(f"🔄 TỰ ĐỘNG BỎ QUA PROFILE KHÓA & CHUYỂN SANG: [{next_p}]...", "info")
                     try:
                         browser.close()
                     except Exception:
                         pass
-                    current_profile = next_profile
+                    current_profile = next_p
+                    current_profile_idx = available_profiles.index(next_p)
                     browser, page, new_status = create_browser_context(p, current_profile, prompt_file, log_callback)
                     if new_status != "FLASH_LITE":
                         switched_ok = True
                         log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG KHÔI PHỤC MODEL PRO! 🚀", "success")
-                        break
 
                 if not switched_ok:
-                    log_callback("🛑 TẤT CẢ CÁC PROFILE CHROME ĐỀU ĐÃ HẾT HẠN MỨC PRO! Tạm dừng 60 phút...")
+                    log_callback("🛑 TẤT CẢ CÁC PROFILE CHROME ĐỀU ĐÃ BỊ KHÓA HẠN MỨC PRO (5 TIẾNG)! Tạm dừng 60 phút...")
                     countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:")
                     page.goto("https://gemini.google.com/app", timeout=60000)
                     page.wait_for_load_state("load")
@@ -160,8 +161,8 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
             log_callback(f"\n--- Đang gửi báo cáo lỗi: {file_name} ---")
 
             short_prompt = (
-                "Dưới đây là báo cáo lỗi SRT. Hãy đọc và trả về các block đã sửa nội dung hoặc timestamp "
-                "theo đúng chuẩn định dạng Repair Engine (chỉ trả về block, ghi [MERGED: x, y] nếu cần gộp)."
+                "Dưới đây là báo cáo lỗi SRT. Hãy đọc và trả về TẤT CẢ các block đã sửa nằm trong DUY NHẤT 1 CODE BLOCK ```srt ... ```.\n"
+                "TUYỆT ĐỐI KHÔNG viết lời giải thích và KHÔNG tách thành nhiều code block riêng lẻ. Chỉ trả về duy nhất 1 code block chứa các block đã sửa."
             )
             
             # Thử lại tối đa 2 lần nếu upload báo cáo bị lỗi/timeout

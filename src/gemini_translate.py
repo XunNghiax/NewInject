@@ -14,7 +14,10 @@ from src.gemini_core import (
     is_srt_structure_match,
     get_matched_blocks_count,
     resolve_profile_path,
-    get_available_profiles
+    get_available_profiles,
+    record_profile_cooldown,
+    is_profile_in_cooldown,
+    get_next_available_pro_profile
 )
 from src.srt_utils import split_srt_file, merge_numbered_srt_files, process_srt_speed
 
@@ -439,26 +442,30 @@ def run_auto_translate_srt(
     log_callback(f"📋 Tìm thấy {len(available_profiles)} Profile Chrome: {', '.join(available_profiles)} (Bắt đầu với [{current_profile}])")
 
     with sync_playwright() as p:
+        # Kiểm tra xem profile ban đầu có đang bị khóa 5 tiếng không
+        in_cd, rem_str, _ = is_profile_in_cooldown(current_profile)
+        if in_cd:
+            log_callback(f"⏩ [CẢNH BÁO] Profile ban đầu [{current_profile}] đang trong thời gian chờ 5 tiếng (Còn {rem_str}). Tự động nhảy sang Profile tiếp theo!", "warning")
+            next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
+            if next_p:
+                current_profile = next_p
+                current_profile_idx = available_profiles.index(next_p)
+
         browser, page, model_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
         if model_status == "FLASH_LITE":
-            start_idx = current_profile_idx
-            switched_ok = False
-            while True:
-                current_profile_idx = (current_profile_idx + 1) % len(available_profiles)
-                if current_profile_idx == start_idx:
-                    break
-                next_profile = available_profiles[current_profile_idx]
-                log_callback(f"🔄 Profile ban đầu [{current_profile}] bị hạ cấp. TỰ ĐỘNG CHUYỂN SANG: [{next_profile}]...", "info")
+            record_profile_cooldown(current_profile, 5.0, log_callback)
+            next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
+            if next_p:
+                log_callback(f"🔄 Profile ban đầu [{current_profile}] bị hết ngạch 5h. TỰ ĐỘNG BỎ QUA & CHUYỂN SANG: [{next_p}]...", "info")
                 try:
                     browser.close()
                 except Exception:
                     pass
-                current_profile = next_profile
+                current_profile = next_p
+                current_profile_idx = available_profiles.index(next_p)
                 browser, page, model_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
                 if model_status != "FLASH_LITE":
-                    switched_ok = True
                     log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG! 🚀", "success")
-                    break
 
         files_translated_in_session = 0
         BATCH_SIZE = 3
@@ -523,32 +530,25 @@ def run_auto_translate_srt(
                 status, model_name = check_model_status(page, log_callback)
                 if status == "FLASH_LITE":
                     log_callback(f"⚠️ Profile [{current_profile}] bị hạ cấp xuống Flash-Lite (Hết hạn mức Pro trong ngày)!", "warning")
+                    record_profile_cooldown(current_profile, 5.0, log_callback)
                     
-                    # Tìm Profile tiếp theo còn hạn mức Pro
+                    next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
                     switched_ok = False
-                    start_idx = current_profile_idx
-                    while True:
-                        current_profile_idx = (current_profile_idx + 1) % len(available_profiles)
-                        if current_profile_idx == start_idx:
-                            # Đã đi hết tất cả các Profile mà tất cả đều hết hạn mức
-                            break
-                            
-                        next_profile = available_profiles[current_profile_idx]
-                        log_callback(f"🔄 TỰ ĐỘNG CHUYỂN SANG PROFILE TIẾP THEO: [{next_profile}]...", "info")
+                    if next_p:
+                        log_callback(f"🔄 TỰ ĐỘNG BỎ QUA PROFILE KHÓA & CHUYỂN SANG: [{next_p}]...", "info")
                         try:
                             browser.close()
                         except Exception:
                             pass
-                            
-                        current_profile = next_profile
+                        current_profile = next_p
+                        current_profile_idx = available_profiles.index(next_p)
                         browser, page, new_status = create_browser_context(p, current_profile, prompt_file, log_callback, check_pause_callback)
                         if new_status != "FLASH_LITE":
                             switched_ok = True
                             log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG! Tiếp tục duy trì Mô hình Pro 🚀", "success")
-                            break
 
                     if not switched_ok:
-                        log_callback("🛑 TẤT CẢ CÁC PROFILE CHROME ĐỀU ĐÃ HẾT HẠN MỨC PRO! Tạm dừng 60 phút chờ Gemini reset...")
+                        log_callback("🛑 TẤT CẢ CÁC PROFILE CHROME ĐỀU ĐÃ BỊ KHÓA HẠN MỨC PRO (5 TIẾNG)! Tạm dừng 60 phút chờ Gemini reset...")
                         countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:", check_pause_callback=check_pause_callback)
                         page.goto("https://gemini.google.com/app", timeout=60000)
                         page.wait_for_load_state("load")
