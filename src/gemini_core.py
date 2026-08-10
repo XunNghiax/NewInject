@@ -76,14 +76,21 @@ def parse_srt_structure(filepath: str) -> Dict[str, str]:
 
 
 def is_srt_structure_match(file_a: str, file_b: str, log_callback: Callable = print) -> bool:
-    """So sánh cấu trúc 2 file SRT. Trả về True nếu khớp, False nếu sai lệch."""
+    """So sánh cấu trúc 2 file SRT. Trả về True nếu khớp cả Block ID và Timeline chính xác, False nếu sai lệch."""
     struct_a = parse_srt_structure(file_a)
     struct_b = parse_srt_structure(file_b)
     keys_a = sorted(struct_a.keys(), key=lambda x: int(x) if x.isdigit() else 0)
     keys_b = sorted(struct_b.keys(), key=lambda x: int(x) if x.isdigit() else 0)
     if not keys_a or not keys_b:
         return False
-    return keys_a == keys_b
+    if keys_a != keys_b:
+        return False
+    for k in keys_a:
+        ts_a = re.sub(r'\s+', '', struct_a[k]).replace('.', ',')
+        ts_b = re.sub(r'\s+', '', struct_b[k]).replace('.', ',')
+        if ts_a != ts_b:
+            return False
+    return True
 
 
 def get_matched_blocks_count(cn_path: str, vi_path: str) -> int:

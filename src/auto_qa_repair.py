@@ -45,6 +45,7 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
         log_callback(f"♻️ Phát hiện tiến trình cũ: Đang tiếp tục làm việc trên các file trong {fixed_srt_folder}...")
 
     # 2. LẤY DANH SÁCH BÁO CÁO 
+    os.makedirs(report_folder, exist_ok=True)
     report_files = [
         f for f in os.listdir(report_folder) 
         if f.lower().endswith('.txt') 

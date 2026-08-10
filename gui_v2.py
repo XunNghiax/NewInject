@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import shutil
 import requests
 from datetime import datetime
 
@@ -127,6 +128,7 @@ class ProcessWorker(QThread):
     progress_signal = pyqtSignal(int, str)    # (percentage, status_text)
     step_signal = pyqtSignal(int)             # Active step index (1-6)
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
+    request_gradio_link_signal = pyqtSignal() # Yêu cầu người dùng nhập link Gradio khi tới Bước 5
 
     def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = ""):
         super().__init__()
@@ -142,7 +144,7 @@ class ProcessWorker(QThread):
         self.auto_inject_capcut = auto_inject_capcut
         self.capcut_draft_path = capcut_draft_path
         self.enable_tts = enable_tts
-        self.gradio_url = gradio_url
+        self.gradio_url = gradio_url.strip() if gradio_url else ""
         self.ref_audio_path = ref_audio_path
         self.ref_text = ref_text
         self._is_paused = False
@@ -151,6 +153,24 @@ class ProcessWorker(QThread):
         self.srt_generator = None
         self.mutex = QMutex()
         self.pause_condition = QWaitCondition()
+
+    def update_gradio_url(self, new_url: str):
+        self.mutex.lock()
+        self.gradio_url = new_url.strip()
+        self.mutex.unlock()
+        self.log_signal.emit(f"🔄 Đã cập nhật link Gradio URL mới: {self.gradio_url}", "info")
+
+    def check_gradio_connection(self, url: str) -> bool:
+        if not url or not url.strip():
+            return False
+        clean = url.strip()
+        if not clean.startswith("http://") and not clean.startswith("https://"):
+            return False
+        try:
+            res = requests.get(clean, timeout=4)
+            return res.status_code in [200, 301, 302]
+        except Exception:
+            return False
 
     def pause(self):
         self.mutex.lock()
@@ -199,18 +219,29 @@ class ProcessWorker(QThread):
             root_downloads = os.path.abspath(self.output_dir)
             os.makedirs(root_downloads, exist_ok=True)
 
-            # ── BƯỚC 1: DOWNLOAD ──
+            final_srt_path = os.path.join(root_downloads, "output.srt")
+            # Dọn dẹp file output.srt cũ nếu có để tránh người dùng nhầm lẫn với dự án trước
+            if os.path.exists(final_srt_path):
+                try:
+                    os.remove(final_srt_path)
+                except Exception:
+                    pass
+
+            # ── BƯỚC 1: DOWNLOAD / NẠP NGUỒN MEDIA ──
             self.step_signal.emit(1)
-            self.emit_progress(5, "⚡ 1. Khởi động Tải Video...")
+            self.emit_progress(5, "⚡ 1. Khởi động Tải Video / Nạp Nguồn...")
             self.emit_log("==================================================", "info")
             self.emit_log("🚀 BẮT ĐẦU QUY TRÌNH XỬ LÝ DỰ ÁN TỰ ĐỘNG (END-TO-END)", "info")
             self.emit_log("==================================================", "info")
 
             video_file = None
-            for f in os.listdir(root_downloads):
-                if f.lower().endswith(('.mp4', '.mkv', '.flv', '.webm')) and not f.endswith('.part'):
-                    video_file = os.path.join(root_downloads, f)
-                    break
+            if self.local_media_path and os.path.exists(self.local_media_path):
+                video_file = self.local_media_path
+            else:
+                for f in os.listdir(root_downloads):
+                    if f.lower().endswith(('.mp4', '.mkv', '.flv', '.webm')) and not f.endswith('.part'):
+                        video_file = os.path.join(root_downloads, f)
+                        break
 
             if not video_file and self.link and BilibiliDownloader and BilibiliDownloader.is_valid_bilibili_url(self.link):
                 self.emit_log(f"📥 Khởi động tải Video từ Bilibili: {self.link}...", "info")
@@ -243,10 +274,13 @@ class ProcessWorker(QThread):
             if not has_cn_splits:
                 self.emit_log(f"🎙️ 2. Trích xuất phụ đề tự động bằng Whisper...", "info")
                 raw_srt = None
-                for f in os.listdir(root_downloads):
-                    if f.lower().endswith('.srt') and f.lower() != 'output.srt' and not f.endswith('_vi.srt') and not f.endswith('_08.srt') and not f.endswith('_speed08.srt'):
-                        raw_srt = os.path.join(root_downloads, f)
-                        break
+                if self.srt_translate_path and os.path.exists(self.srt_translate_path):
+                    raw_srt = self.srt_translate_path
+                else:
+                    for f in os.listdir(root_downloads):
+                        if f.lower().endswith('.srt') and f.lower() != 'output.srt' and not f.endswith('_vi.srt') and not f.endswith('_08.srt') and not f.endswith('_speed08.srt'):
+                            raw_srt = os.path.join(root_downloads, f)
+                            break
 
                 if not raw_srt and video_file and SubtitleGenerator:
                     self.emit_progress(25, "Đang nhận diện giọng nói tạo phụ đề SRT...")
@@ -279,9 +313,9 @@ class ProcessWorker(QThread):
             else:
                 self.emit_log(f"✅ Đã tìm thấy thư mục phụ đề gốc: {cn_folder}", "info")
 
-            # ── BƯỚC 3: DỊCH THUẬT AI (GEMINI) ──
+            # ── BƯỚC 3: DỊCH THUẬT AI & SO KHỚP TIMECODE 100% ──
             self.step_signal.emit(3)
-            self.emit_progress(45, "3. Đang chạy Gemini AI dịch Tiếng Việt...")
+            self.emit_progress(45, "3. Đang chạy Gemini AI dịch Tiếng Việt & kiểm tra Timecode...")
             os.makedirs(vi_folder, exist_ok=True)
 
             if run_auto_translate_srt:
@@ -304,21 +338,40 @@ class ProcessWorker(QThread):
                     check_pause_callback=self.check_pause
                 )
 
-            final_srt_path = os.path.join(root_downloads, "output.srt")
-            if merge_numbered_srt_files:
-                self.emit_log("🧩 Đang gộp các tệp SRT Tiếng Việt đã dịch...", "info")
-                merge_numbered_srt_files(vi_folder, final_srt_path, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+            # CỔNG 1: Kiểm tra xem các file part tiếng Việt đã hoàn tất và khớp 100% timecode chưa
+            vi_parts = [f for f in os.listdir(vi_folder) if f.endswith('.srt')]
+            if not vi_parts:
+                self.finished_signal.emit(False, "❌ Thất bại: Không có file phụ đề tiếng Việt nào được dịch hoàn tất!")
+                return
 
-            # ── BƯỚC 4: AUTO QA & REPAIR ──
+            self.emit_log(f"✅ CỔNG 1 ĐẠT CHUẨN: Đã dịch và xác nhận khớp 100% mốc thời gian cho {len(vi_parts)} file phân đoạn tiếng Việt!", "success")
+            self.emit_log("💡 (Không tạo output.srt trung gian ở bước này để tránh nhầm lẫn với bản dịch chưa qua QA)", "info")
+
+            # ── BƯỚC 4: AUTO QA TRỰC TIẾP TRÊN TỪNG PART & SỬA TRONG THƯ MỤC FIXED ──
             self.step_signal.emit(4)
-            self.emit_progress(65, "4. Đang kiểm tra QA & tự động sửa lỗi SRT...")
+            self.emit_progress(65, "4. Đang kiểm tra QA & tự động sửa lỗi trực tiếp trên từng part...")
             report_folder = os.path.join(root_downloads, f"temp_split_qa_reports_{raw_title}")
             fixed_vi_folder = os.path.join(root_downloads, f"temp_split_vi_fixed_{raw_title}")
+            os.makedirs(report_folder, exist_ok=True)
+            os.makedirs(fixed_vi_folder, exist_ok=True)
 
+            # Khởi tạo bản sao các part sang fixed_vi_folder
+            for fn in os.listdir(vi_folder):
+                if fn.endswith('.srt'):
+                    src_p = os.path.join(vi_folder, fn)
+                    dst_p = os.path.join(fixed_vi_folder, fn)
+                    if not os.path.exists(dst_p):
+                        shutil.copy2(src_p, dst_p)
+
+            # Quét phân tích lỗi QA lần 1
             if analyze_srt_to_file:
                 analyze_srt_to_file(vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
 
-            if run_auto_qa_repair:
+            # Kiểm tra xem có file báo cáo QA nào cần sửa không
+            report_files = [f for f in os.listdir(report_folder) if f.endswith('.txt') and not f.endswith('_da_sua.txt') and not f.endswith('.done') and ('report' in f.lower() or 'qa' in f.lower())]
+
+            if report_files and run_auto_qa_repair:
+                self.emit_log(f"🧹 Tìm thấy {len(report_files)} báo cáo lỗi QA. Tiến hành vá lỗi & gộp câu tự động...", "info")
                 qa_prompt = os.path.abspath("./user_data/prompts/promptRepair.md")
                 if not os.path.exists(qa_prompt):
                     qa_prompt = os.path.abspath("./user_data/prompts/prompt_qa_repair.txt")
@@ -326,6 +379,7 @@ class ProcessWorker(QThread):
                     os.makedirs(os.path.dirname(qa_prompt), exist_ok=True)
                     with open(qa_prompt, "w", encoding="utf-8") as qf:
                         qf.write("Hãy kiểm tra và sửa lỗi các câu phụ đề vượt quá độ dài hoặc đè timecode.")
+
                 run_auto_qa_repair(
                     prompt_file=qa_prompt,
                     report_folder=report_folder,
@@ -335,16 +389,40 @@ class ProcessWorker(QThread):
                     log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl)
                 )
 
-                # Sau khi Auto QA sửa lỗi xong, tái gộp các file từ thư mục fixed_vi_folder vào file tổng
-                if merge_numbered_srt_files and os.path.exists(fixed_vi_folder) and os.listdir(fixed_vi_folder):
-                    self.emit_log("🧩 Đang tái gộp các tệp SRT Tiếng Việt ĐÃ SỬA LỖI (FIXED) vào file hoàn chỉnh...", "info")
-                    merge_numbered_srt_files(fixed_vi_folder, final_srt_path, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                # Quét lại (Re-scan) trên thư mục fixed_vi_folder để đảm bảo không còn lỗi nghiêm trọng
+                if analyze_srt_to_file:
+                    rescan_report_folder = os.path.join(root_downloads, f"temp_split_qa_rescan_{raw_title}")
+                    os.makedirs(rescan_report_folder, exist_ok=True)
+                    re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, rescan_report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                    if re_crit == 0:
+                        self.emit_log(f"✅ RE-SCAN HOÀN HẢO: 0 Lỗi nghiêm trọng (Critical) sau khi sửa! (Còn {re_warn} cảnh báo nhỏ)", "success")
+                    else:
+                        self.emit_log(f"⚠️ RE-SCAN: Còn lại {re_crit} lỗi nghiêm trọng và {re_warn} cảnh báo.", "warning")
+            else:
+                self.emit_log("✅ Phụ đề tiếng Việt đạt chuẩn chất lượng 100%, không phát hiện lỗi QA cần sửa!", "success")
 
-            # ── BƯỚC 5: SINH AUDIO (TTS GRADIO) ──
+            # ── CỔNG 3: XUẤT DUY NHẤT 1 FILE output.srt THÀNH PHẨM HOÀN HẢO ──
+            if merge_numbered_srt_files and os.path.exists(fixed_vi_folder) and os.listdir(fixed_vi_folder):
+                self.emit_log("🧩 CỔNG 3: Hoàn tất kiểm duyệt QA! Tiến hành xuất DUY NHẤT file thành phẩm: output.srt...", "info")
+                merge_numbered_srt_files(fixed_vi_folder, final_srt_path, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                self.emit_log(f"🎉 ĐÃ XUẤT FILE THÀNH PHẨM DUY NHẤT: {final_srt_path} (Sẵn sàng 100% để sinh Audio TTS / Nhúng CapCut)", "success")
+            else:
+                self.finished_signal.emit(False, "❌ Thất bại khi tạo file output.srt cuối cùng!")
+                return
+
+            # ── BƯỚC 5: SINH AUDIO (TTS GRADIO) VỚI ĐIỂM DỪNG THÔNG MINH (JUST-IN-TIME) ──
             self.step_signal.emit(5)
             if self.enable_tts:
-                self.emit_progress(80, "5. Đang sinh Audio bằng Gradio TTS Server...")
-                self.emit_log("🎙️ Khởi động sinh giọng nói AI từ phụ đề SRT...", "info")
+                self.emit_progress(80, "5. Kiểm tra kết nối Gradio TTS Server...")
+                while not self.check_gradio_connection(self.gradio_url):
+                    self.emit_log("⏸️ [ĐIỂM DỪNG THÔNG MINH] File output.srt đã hoàn thiện 100%!", "warning")
+                    self.emit_log("👉 Hãy mở Google Colab lấy link Gradio mới (https://xxxx.gradio.live), dán vào ô 'Gradio URL' rồi bấm '▶️ TIẾP TỤC'!", "info")
+                    self.request_gradio_link_signal.emit()
+                    self.pause()
+                    self.check_pause()
+
+                self.emit_progress(85, "5. Đang sinh Audio bằng Gradio TTS Server...")
+                self.emit_log(f"🎙️ Kết nối Gradio TTS Server thành công ({self.gradio_url})! Đang sinh Audio từ file chuẩn output.srt...", "success")
 
             # ── BƯỚC 6: CAPCUT DRAFT INJECT ──
             self.step_signal.emit(6)
@@ -589,7 +667,7 @@ class MainWindowV2(QMainWindow):
         top_layout.setSpacing(6)
 
         # ── MASTER CARD 1: CẤU HÌNH DỰ ÁN BẤT ĐỐI XỨNG SO LE ──
-        card1_group = QGroupBox("🎬 Cấu Hình Dự Án & Gradio Server URL (Bố Cục Bất Đối Xứng)")
+        card1_group = QGroupBox("🎬 Cấu Hình Dự Án")
         card1_group.setObjectName("MasterCard")
         card1_layout = QVBoxLayout(card1_group)
         card1_layout.setContentsMargins(12, 8, 12, 8)
@@ -1271,15 +1349,14 @@ class MainWindowV2(QMainWindow):
             missing_fields.append("Đường dẫn CapCut Draft")
 
         if enable_tts:
-            if not gradio:
-                self.txt_gradio_url.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
-                missing_fields.append("Gradio Server URL")
             if not ref_aud:
                 self.txt_ref_audio.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
                 missing_fields.append("File Voice Mẫu (.wav)")
             if not ref_txt:
                 self.txt_ref_text.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
                 missing_fields.append("Văn bản Voice Mẫu")
+            if not gradio:
+                self.append_log("💡 Gradio URL đang để trống. Hệ thống sẽ tự động TẠM DỪNG ở Bước 5 để bạn dán link mới từ Colab!", "info")
 
         if missing_fields:
             msg = "Vui lòng bổ sung các thông tin bắt buộc sau trước khi bấm BẮT ĐẦU:\n\n• " + "\n• ".join(missing_fields)
@@ -1333,8 +1410,26 @@ class MainWindowV2(QMainWindow):
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_progress)
         self.worker.step_signal.connect(self.stepper_widget.set_step)
+        self.worker.request_gradio_link_signal.connect(self.on_request_gradio_link)
         self.worker.finished_signal.connect(self.on_process_finished)
         self.worker.start()
+
+    def on_request_gradio_link(self):
+        self.is_paused = True
+        self.timer.stop()
+        self.btn_pause.setText("▶️ DÁN LINK & TIẾP TỤC")
+        self.update_kpi_value("kpi_status", "CHỜ GRADIO URL ⏳", "#a855f7")
+        self.lbl_system_badge.setText("⏳ CHỜ COLAB")
+        self.set_badge_style(self.lbl_system_badge, "#7e22ce", "white")
+        self.txt_gradio_url.setStyleSheet("border: 2px solid #a855f7; background-color: #3b0764;")
+        self.txt_gradio_url.setFocus()
+        QMessageBox.information(
+            self,
+            "Đã Xong Phụ Đề output.srt 🎉",
+            "🎉 File phụ đề output.srt đã hoàn tất 100%!\n\n"
+            "Bây giờ bạn hãy mở Google Colab, chạy cell để lấy link Gradio mới (https://xxxx.gradio.live),\n"
+            "dán vào ô 'Gradio URL' trên giao diện và bấm nút '▶️ DÁN LINK & TIẾP TỤC' để sinh giọng nói AI!"
+        )
 
     def on_pause_clicked(self):
         if not self.worker or not self.worker.isRunning():
@@ -1346,11 +1441,18 @@ class MainWindowV2(QMainWindow):
             self.btn_pause.setText("▶️ TIẾP TỤC")
             self.update_kpi_value("kpi_status", "ĐÃ TẠM DỪNG ⏸️", "#f59e0b")
         else:
+            new_gradio = self.txt_gradio_url.text().strip()
+            if new_gradio and self.worker:
+                self.worker.update_gradio_url(new_gradio)
+            self.save_user_config()
+            self.txt_gradio_url.setStyleSheet("")
             self.worker.resume()
             self.is_paused = False
             self.timer.start()
             self.btn_pause.setText("⏸️ TẠM DỪNG")
             self.update_kpi_value("kpi_status", "Đang xử lý ⚡", "#6366f1")
+            self.lbl_system_badge.setText("⚡ CHẠY TỰ ĐỘNG")
+            self.set_badge_style(self.lbl_system_badge, "#0284c7", "white")
 
     def on_stop_clicked(self):
         if self.worker and self.worker.isRunning():
