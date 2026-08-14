@@ -754,6 +754,7 @@ class MainWindowV2(QMainWindow):
         self.txt_gradio_url.setObjectName("MasterInput")
         self.txt_gradio_url.setPlaceholderText("Link Gradio mới...")
         self.txt_gradio_url.editingFinished.connect(self.save_user_config)
+        self.txt_gradio_url.textChanged.connect(self.auto_ping_gradio)
 
         self.btn_paste_gradio = QToolButton()
         self.btn_paste_gradio.setText("📋 Dán")
@@ -1500,6 +1501,14 @@ class MainWindowV2(QMainWindow):
             "Bây giờ bạn hãy mở Google Colab, chạy cell để lấy link Gradio mới (https://xxxx.gradio.live),\n"
             "dán vào ô 'Gradio URL' trên giao diện và bấm nút '▶️ DÁN LINK & TIẾP TỤC' để sinh giọng nói AI!"
         )
+
+    def auto_ping_gradio(self, text):
+        text = text.strip()
+        # Nếu đang ở trạng thái tạm dừng chờ Gradio URL
+        if getattr(self, 'is_paused', False) and self.worker and self.worker.isRunning() and self.btn_pause.text() == "▶️ DÁN LINK & TIẾP TỤC":
+            if (text.startswith("http://") or text.startswith("https://")) and len(text) > 15:
+                self.append_log(f"⚡ Đã phát hiện dán link Gradio: {text}. Tự động kiểm tra...", "info")
+                self.on_pause_clicked()
 
     def on_pause_clicked(self):
         if not self.worker or not self.worker.isRunning():
