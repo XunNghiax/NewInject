@@ -44,12 +44,14 @@ class SubtitleGenerator:
         self,
         output_dir: str = "./downloads",
         log_callback: Optional[Callable[[str, str], None]] = None,
-        progress_callback: Optional[Callable[[int, str], None]] = None
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+        check_pause_callback: Optional[Callable[[], None]] = None
     ):
         self.output_dir = os.path.abspath(output_dir)
         os.makedirs(self.output_dir, exist_ok=True)
         self.log_fn = log_callback if log_callback else (lambda msg, lvl="info": print(f"[{lvl.upper()}] {msg}"))
         self.progress_fn = progress_callback if progress_callback else (lambda pct, status: None)
+        self.check_pause_callback = check_pause_callback
         self._is_cancelled = False
         self._loaded_model = None
         self._loaded_model_size = None
@@ -174,6 +176,8 @@ class SubtitleGenerator:
             total_duration = info.duration if info.duration > 0 else 1.0
 
             for segment in segments:
+                if self.check_pause_callback:
+                    self.check_pause_callback()
                 if self._is_cancelled:
                     self.log_fn("🛑 Đã hủy tiến trình nhận diện giọng nói!", "warning")
                     return {"success": False, "error": "Đã bị hủy bởi người dùng"}

@@ -22,7 +22,7 @@ from src.gemini_translate import (
 from src.batch_replace_srt import replace_blocks_in_folder
 from playwright.sync_api import sync_playwright
 
-def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_srt_folder, profile_folder="chrome_data_1", wait_time=300, delay_time=15, log_callback=print):
+def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_srt_folder, profile_folder="chrome_data_1", wait_time=300, delay_time=15, log_callback=print, progress_callback=None, check_pause_callback=None):
     """
     Tự động hóa gửi báo cáo lỗi cho LLM, nhận patch và sửa trên bản sao SRT.
     - BẢO VỆ TIẾN TRÌNH CŨ (.DONE)
@@ -117,6 +117,8 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
         BATCH_SIZE = 3
 
         for file_name in report_files:
+            if check_pause_callback:
+                check_pause_callback()
             report_path = os.path.join(report_folder, file_name)
             
             # Kiểm tra hạn mức Pro trước khi gửi báo cáo

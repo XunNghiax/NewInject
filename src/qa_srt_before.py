@@ -372,7 +372,8 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
 
 
 def analyze_srt_to_file(in_path, out_path, errors_per_file=80,
-                        log_callback=print, scan_mode='all'):
+                        log_callback=print, scan_mode='all',
+                        check_pause_callback=None):
     """
     Hàm giao tiếp với GUI.
     Tự động nhận diện xử lý 1 File đơn lẻ hoặc Hàng loạt Thư Mục.
@@ -415,6 +416,8 @@ def analyze_srt_to_file(in_path, out_path, errors_per_file=80,
         return
 
     for file in files_to_process:
+        if check_pause_callback:
+            check_pause_callback()
         clusters, b_cnt, c_cnt, w_cnt = analyze_single_srt(file, log_callback, scan_mode)
         all_error_clusters.extend(clusters)
         total_blocks_all += b_cnt

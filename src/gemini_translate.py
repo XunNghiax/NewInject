@@ -404,6 +404,7 @@ def run_auto_translate_srt(
     log_callback: Callable = print,
     profile_folder: str = "chrome_data_1",
     check_pause_callback: Optional[Callable] = None,
+    progress_callback: Optional[Callable] = None,
     blocks_per_split: int = 100,
     target_speed: float = 1.0,
     **kwargs
@@ -470,7 +471,11 @@ def run_auto_translate_srt(
         files_translated_in_session = 0
         BATCH_SIZE = 3
 
-        for file_name in srt_files:
+        total_files_for_progress = len(srt_files)
+        for idx_prog, file_name in enumerate(srt_files):
+            if progress_callback:
+                progress_callback(int((idx_prog / total_files_for_progress) * 100), f"Đang xử lý tệp {idx_prog+1}/{total_files_for_progress}...")
+
             cn_file_path = os.path.join(cn_folder, file_name)
 
             # Tự động dãn mốc thời gian file Tiếng Trung gốc xuống 0.8x nếu bật

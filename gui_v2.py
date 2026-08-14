@@ -125,7 +125,8 @@ class BilibiliLoginWorker(QThread):
 # ==============================================================================
 class ProcessWorker(QThread):
     log_signal = pyqtSignal(str, str)         # (log_msg, log_level)
-    progress_signal = pyqtSignal(int, str)    # (percentage, status_text)
+    progress_signal = pyqtSignal(int, str)
+    global_progress_signal = pyqtSignal(int, str)    # (percentage, status_text)
     step_signal = pyqtSignal(int)             # Active step index (1-6)
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
     request_gradio_link_signal = pyqtSignal() # Yêu cầu người dùng nhập link Gradio khi tới Bước 5
@@ -231,7 +232,7 @@ class ProcessWorker(QThread):
 
             # ── BƯỚC 1: DOWNLOAD / NẠP NGUỒN MEDIA ──
             self.step_signal.emit(1)
-            self.emit_progress(5, "⚡ 1. Khởi động Tải Video / Nạp Nguồn...")
+            self.global_progress_signal.emit(5, "⚡ 1. Khởi động Tải Video / Nạp Nguồn...")
             self.emit_log("==================================================", "info")
             self.emit_log("🚀 BẮT ĐẦU QUY TRÌNH XỬ LÝ DỰ ÁN TỰ ĐỘNG (END-TO-END)", "info")
             self.emit_log("==================================================", "info")
@@ -247,11 +248,12 @@ class ProcessWorker(QThread):
 
             if not video_file and self.link and BilibiliDownloader and BilibiliDownloader.is_valid_bilibili_url(self.link):
                 self.emit_log(f"📥 Khởi động tải Video từ Bilibili: {self.link}...", "info")
-                self.emit_progress(10, "Đang tải Video Bilibili...")
+                self.global_progress_signal.emit(10, "Đang tải Video Bilibili...")
                 self.downloader = BilibiliDownloader(
                     output_dir=root_downloads,
                     log_callback=self.emit_log,
-                    progress_callback=self.emit_progress
+                    progress_callback=self.emit_progress,
+                    check_pause_callback=self.check_pause
                 )
                 res = self.downloader.download(self.link)
                 if res.get("success"):
@@ -291,11 +293,12 @@ class ProcessWorker(QThread):
                                 break
     
                     if not raw_srt and video_file and SubtitleGenerator:
-                        self.emit_progress(25, "Đang nhận diện giọng nói tạo phụ đề SRT...")
+                        self.global_progress_signal.emit(25, "Đang nhận diện giọng nói tạo phụ đề SRT...")
                         self.srt_generator = SubtitleGenerator(
                             output_dir=root_downloads,
                             log_callback=self.emit_log,
-                            progress_callback=self.emit_progress
+                            progress_callback=self.emit_progress,
+                            check_pause_callback=self.check_pause
                         )
                         srt_res = self.srt_generator.generate_srt(video_file, model_size="base")
                         if srt_res.get("success"):
@@ -323,7 +326,7 @@ class ProcessWorker(QThread):
     
                 # ── BƯỚC 3: DỊCH THUẬT AI & SO KHỚP TIMECODE 100% ──
                 self.step_signal.emit(3)
-                self.emit_progress(45, "3. Đang chạy Gemini AI dịch Tiếng Việt & kiểm tra Timecode...")
+                self.global_progress_signal.emit(45, "3. Đang chạy Gemini AI dịch Tiếng Việt & kiểm tra Timecode...")
                 os.makedirs(vi_folder, exist_ok=True)
     
                 if run_auto_translate_srt:
@@ -363,7 +366,7 @@ class ProcessWorker(QThread):
     
                 # ── BƯỚC 4: AUTO QA TRỰC TIẾP TRÊN TỪNG PART & SỬA TRONG THƯ MỤC FIXED ──
                 self.step_signal.emit(4)
-                self.emit_progress(65, "4. Đang kiểm tra QA & tự động sửa lỗi trực tiếp trên từng part...")
+                self.global_progress_signal.emit(65, "4. Đang kiểm tra QA & tự động sửa lỗi trực tiếp trên từng part...")
                 report_folder = os.path.join(root_downloads, f"temp_split_qa_reports_{raw_title}")
                 fixed_vi_folder = os.path.join(root_downloads, f"temp_split_vi_fixed_{raw_title}")
                 os.makedirs(report_folder, exist_ok=True)
@@ -379,7 +382,7 @@ class ProcessWorker(QThread):
     
                 # Quét phân tích lỗi QA lần 1
                 if analyze_srt_to_file:
-                    analyze_srt_to_file(vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                    analyze_srt_to_file(vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
     
                 # Kiểm tra xem có file báo cáo QA nào cần sửa không
                 report_files = [f for f in os.listdir(report_folder) if f.endswith('.txt') and not f.endswith('_da_sua.txt') and not f.endswith('.done') and ('report' in f.lower() or 'qa' in f.lower())]
@@ -400,14 +403,15 @@ class ProcessWorker(QThread):
                         original_srt_folder=vi_folder,
                         fixed_srt_folder=fixed_vi_folder,
                         profile_folder=self.profile_folder,
-                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl)
+                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                        check_pause_callback=self.check_pause
                     )
     
                     # Quét lại (Re-scan) trên thư mục fixed_vi_folder để đảm bảo không còn lỗi nghiêm trọng
                     if analyze_srt_to_file:
                         rescan_report_folder = os.path.join(root_downloads, f"temp_split_qa_rescan_{raw_title}")
                         os.makedirs(rescan_report_folder, exist_ok=True)
-                        re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, rescan_report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                        re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, rescan_report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
                         if re_crit == 0:
                             self.emit_log(f"✅ RE-SCAN HOÀN HẢO: 0 Lỗi nghiêm trọng (Critical) sau khi sửa! (Còn {re_warn} cảnh báo nhỏ)", "success")
                         else:
@@ -427,7 +431,7 @@ class ProcessWorker(QThread):
             # ── BƯỚC 5: SINH AUDIO (TTS GRADIO) VỚI ĐIỂM DỪNG THÔNG MINH (JUST-IN-TIME) ──
             self.step_signal.emit(5)
             if self.enable_tts:
-                self.emit_progress(80, "5. Kiểm tra kết nối Gradio TTS Server...")
+                self.global_progress_signal.emit(80, "5. Kiểm tra kết nối Gradio TTS Server...")
                 while not self.check_gradio_connection(self.gradio_url):
                     self.emit_log("⏸️ [ĐIỂM DỪNG THÔNG MINH] File output.srt đã hoàn thiện 100%!", "warning")
                     self.emit_log("👉 Hãy mở Google Colab lấy link Gradio mới (https://xxxx.gradio.live), dán vào ô 'Gradio URL' rồi bấm '▶️ TIẾP TỤC'!", "info")
@@ -435,13 +439,13 @@ class ProcessWorker(QThread):
                     self.pause()
                     self.check_pause()
 
-                self.emit_progress(85, "5. Đang sinh Audio bằng Gradio TTS Server...")
+                self.global_progress_signal.emit(85, "5. Đang sinh Audio bằng Gradio TTS Server...")
                 self.emit_log(f"🎙️ Kết nối Gradio TTS Server thành công ({self.gradio_url})! Đang sinh Audio từ file chuẩn output.srt...", "success")
 
             # ── BƯỚC 6: CAPCUT DRAFT INJECT ──
             self.step_signal.emit(6)
             if self.auto_inject_capcut and self.capcut_draft_path and os.path.exists(self.capcut_draft_path):
-                self.emit_progress(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
+                self.global_progress_signal.emit(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
                 self.emit_log(f"💉 Bơm phụ đề vào CapCut Draft: {self.capcut_draft_path}...", "info")
                 
                 if self.capcut_draft_path.lower().endswith(".json"):
@@ -460,14 +464,14 @@ class ProcessWorker(QThread):
                             "GROUP_SRT": self.group_srt,
                             "SPEED_RATIO": 1.25
                         }
-                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
+                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=self.progress_signal.emit)
                         backend.ensure_capcut_closed()
                         backend.run_process(only_inject=not self.enable_tts)
                         self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")
                     except Exception as inject_e:
                         self.emit_log(f"⚠️ Thất bại khi nhúng vào CapCut: {inject_e}", "warning")
 
-            self.emit_progress(100, "HOÀN TẤT DỰ ÁN! 🎉")
+            self.global_progress_signal.emit(100, "HOÀN TẤT DỰ ÁN! 🎉")
             self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 Phụ đề lưu tại: {final_srt_path}")
 
         except Exception as e:
@@ -1008,13 +1012,36 @@ class MainWindowV2(QMainWindow):
         unified_console_layout.addLayout(top_control_row)
 
         # HÀNG MID: THANH PROGRESS BAR GẤP ĐÔI ĐỘ DÀY (16PX) CHẠY 100% CHIỀU NGANG
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setObjectName("CustomProgressBar")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(16)
-        self.progress_bar.setTextVisible(False)
-        unified_console_layout.addWidget(self.progress_bar)
+        # UI: Two progress bars
+        progress_layout = QVBoxLayout()
+        progress_layout.setSpacing(5)
+        
+        lbl_global = QLabel("🌍 Tiến độ Tổng Thể (Global):")
+        lbl_global.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.global_progress_bar = QProgressBar()
+        self.global_progress_bar.setObjectName("GlobalProgressBar")
+        self.global_progress_bar.setRange(0, 100)
+        self.global_progress_bar.setValue(0)
+        self.global_progress_bar.setFixedHeight(12)
+        self.global_progress_bar.setTextVisible(False)
+        self.global_progress_bar.setStyleSheet("QProgressBar { border: 1px solid #334155; border-radius: 4px; background: #1e293b; } QProgressBar::chunk { background-color: #3b82f6; border-radius: 3px; }")
+
+        lbl_local = QLabel("🎯 Tiến độ Bước Hiện Tại (Local):")
+        lbl_local.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        self.local_progress_bar = QProgressBar()
+        self.local_progress_bar.setObjectName("LocalProgressBar")
+        self.local_progress_bar.setRange(0, 100)
+        self.local_progress_bar.setValue(0)
+        self.local_progress_bar.setFixedHeight(12)
+        self.local_progress_bar.setTextVisible(False)
+        self.local_progress_bar.setStyleSheet("QProgressBar { border: 1px solid #334155; border-radius: 4px; background: #1e293b; } QProgressBar::chunk { background-color: #10b981; border-radius: 3px; }")
+
+        progress_layout.addWidget(lbl_global)
+        progress_layout.addWidget(self.global_progress_bar)
+        progress_layout.addWidget(lbl_local)
+        progress_layout.addWidget(self.local_progress_bar)
+        
+        unified_console_layout.addLayout(progress_layout)
 
         # HÀNG LỌC LOG TOOLBAR
         console_toolbar = QHBoxLayout()
@@ -1422,7 +1449,8 @@ class MainWindowV2(QMainWindow):
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
 
-        self.progress_bar.setValue(0)
+        self.global_progress_bar.setValue(0)
+        self.local_progress_bar.setValue(0)
         self.update_kpi_value("kpi_percent", "0%", "#10b981")
         self.update_kpi_value("kpi_status", "Đang xử lý ⚡", "#6366f1")
         self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
@@ -1449,7 +1477,8 @@ class MainWindowV2(QMainWindow):
             fast_forward_mode=fast_forward
         )
         self.worker.log_signal.connect(self.append_log)
-        self.worker.progress_signal.connect(self.update_progress)
+        self.worker.progress_signal.connect(self.update_local_progress)
+        self.worker.global_progress_signal.connect(self.update_global_progress)
         self.worker.step_signal.connect(self.stepper_widget.set_step)
         self.worker.request_gradio_link_signal.connect(self.on_request_gradio_link)
         self.worker.finished_signal.connect(self.on_process_finished)
