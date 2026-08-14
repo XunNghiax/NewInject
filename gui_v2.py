@@ -130,7 +130,7 @@ class ProcessWorker(QThread):
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
     request_gradio_link_signal = pyqtSignal() # Yêu cầu người dùng nhập link Gradio khi tới Bước 5
 
-    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = ""):
+    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = "", group_srt: bool = False):
         super().__init__()
         self.link = link
         self.output_dir = output_dir
@@ -147,6 +147,7 @@ class ProcessWorker(QThread):
         self.gradio_url = gradio_url.strip() if gradio_url else ""
         self.ref_audio_path = ref_audio_path
         self.ref_text = ref_text
+        self.group_srt = group_srt
         self._is_paused = False
         self._is_stopped = False
         self.downloader = None
@@ -319,24 +320,30 @@ class ProcessWorker(QThread):
             os.makedirs(vi_folder, exist_ok=True)
 
             if run_auto_translate_srt:
-                prompt_file = os.path.abspath("./user_data/prompts/promptTranslates.md")
-                if not os.path.exists(prompt_file):
-                    prompt_file = os.path.abspath("./user_data/prompts/translate.txt")
-                if not os.path.exists(prompt_file):
-                    os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
-                    with open(prompt_file, "w", encoding="utf-8") as pf:
-                        pf.write("Hãy dịch chính xác file SRT này sang Tiếng Việt. Giữ nguyên định dạng mốc thời gian.")
-
-                run_auto_translate_srt(
-                    prompt_file=prompt_file,
-                    cn_folder=cn_folder,
-                    vi_folder=vi_folder,
-                    profile_folder=self.profile_folder,
-                    wait_time=300,
-                    delay_time=15,
-                    log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                    check_pause_callback=self.check_pause
-                )
+                cn_files = [f for f in os.listdir(cn_folder) if f.endswith('.srt')]
+                vi_files = [f for f in os.listdir(vi_folder) if f.endswith('.srt')]
+                
+                if len(cn_files) > 0 and len(cn_files) == len(vi_files):
+                    self.emit_log("⏩ Bỏ qua bước dịch thuật vì đã có đủ file phụ đề Tiếng Việt trong thư mục đích.", "info")
+                else:
+                    prompt_file = os.path.abspath("./user_data/prompts/promptTranslates.md")
+                    if not os.path.exists(prompt_file):
+                        prompt_file = os.path.abspath("./user_data/prompts/translate.txt")
+                    if not os.path.exists(prompt_file):
+                        os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
+                        with open(prompt_file, "w", encoding="utf-8") as pf:
+                            pf.write("Hãy dịch chính xác file SRT này sang Tiếng Việt. Giữ nguyên định dạng mốc thời gian.")
+    
+                    run_auto_translate_srt(
+                        prompt_file=prompt_file,
+                        cn_folder=cn_folder,
+                        vi_folder=vi_folder,
+                        profile_folder=self.profile_folder,
+                        wait_time=300,
+                        delay_time=15,
+                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                        check_pause_callback=self.check_pause
+                    )
 
             # CỔNG 1: Kiểm tra xem các file part tiếng Việt đã hoàn tất và khớp 100% timecode chưa
             vi_parts = [f for f in os.listdir(vi_folder) if f.endswith('.srt')]
@@ -430,17 +437,20 @@ class ProcessWorker(QThread):
                 self.emit_progress(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
                 self.emit_log(f"💉 Bơm phụ đề vào CapCut Draft: {self.capcut_draft_path}...", "info")
                 
-                draft_json = os.path.join(self.capcut_draft_path, "draft_content.json")
+                if self.capcut_draft_path.lower().endswith(".json"):
+                    draft_json = self.capcut_draft_path
+                else:
+                    draft_json = os.path.join(self.capcut_draft_path, "draft_content.json")
                 if os.path.exists(draft_json) and CapCutBackend:
                     try:
                         cfg = {
                             "SRT_FILE_PATH": final_srt_path,
                             "CAPCUT_JSON_PATH": draft_json,
-                            "AUDIO_OUT_DIR": os.path.join(root_downloads, "audio_tts_out"),
+                            "AUDIO_OUT_DIR": os.path.join(root_downloads, f"voice_{raw_title}"),
                             "SERVER_URL": self.gradio_url,
                             "REF_AUDIO_PATH": self.ref_audio_path,
                             "REF_TEXT": self.ref_text,
-                            "GROUP_SRT": True,
+                            "GROUP_SRT": self.group_srt,
                             "SPEED_RATIO": 0.8
                         }
                         backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
@@ -794,7 +804,7 @@ class MainWindowV2(QMainWindow):
 
         # CapCut Draft Column (65% width)
         col_draft = QVBoxLayout()
-        lbl_draft = QLabel("📂 Đường Dẫn CapCut PC Draft Path: *")
+        lbl_draft = QLabel("📂 Đường Dẫn CapCut PC Draft (Thư mục hoặc file draft_content.json): *")
         lbl_draft.setObjectName("InputLabel")
         draft_box = QHBoxLayout()
         draft_box.setSpacing(6)
@@ -842,8 +852,14 @@ class MainWindowV2(QMainWindow):
         self.chk_enable_tts.setObjectName("PurpleCheck")
         self.chk_enable_tts.toggled.connect(self.save_user_config)
         
+        self.chk_group_srt = QCheckBox("🗜️ Gộp phụ đề (Group SRT)")
+        self.chk_group_srt.setChecked(False)
+        self.chk_group_srt.setObjectName("NormalCheck")
+        self.chk_group_srt.toggled.connect(self.save_user_config)
+        
         check_row.addWidget(self.chk_auto_inject_capcut)
         check_row.addWidget(self.chk_enable_tts)
+        check_row.addWidget(self.chk_group_srt)
         check_row.addStretch()
         card1_layout.addLayout(check_row)
 
@@ -1176,6 +1192,9 @@ class MainWindowV2(QMainWindow):
                     self.txt_ref_text.setText(last_ref_txt)
                 if hasattr(self, 'chk_enable_tts'):
                     self.chk_enable_tts.setChecked(enable_tts)
+                group_srt = self.user_cfg.get("group_srt", False)
+                if hasattr(self, 'chk_group_srt'):
+                    self.chk_group_srt.setChecked(group_srt)
                 if hasattr(self, 'chk_auto_inject_capcut'):
                     self.chk_auto_inject_capcut.setChecked(auto_inject_capcut)
                 if hasattr(self, 'chk_autoscroll'):
@@ -1199,6 +1218,7 @@ class MainWindowV2(QMainWindow):
                 "last_ref_audio": self.txt_ref_audio.text().strip(),
                 "last_ref_text": self.txt_ref_text.text().strip(),
                 "enable_tts": self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True,
+                "group_srt": self.chk_group_srt.isChecked() if hasattr(self, 'chk_group_srt') else False,
                 "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
                 "autoscroll": self.chk_autoscroll.isChecked() if hasattr(self, 'chk_autoscroll') else True
             }
@@ -1274,9 +1294,9 @@ class MainWindowV2(QMainWindow):
             self.txt_link.setText(f)
 
     def browse_capcut_draft(self):
-        d = QFileDialog.getExistingDirectory(self, "Chọn thư mục CapCut PC Draft", self.txt_capcut_draft.text().strip())
-        if d:
-            self.txt_capcut_draft.setText(d)
+        f, _ = QFileDialog.getOpenFileName(self, "Chọn file draft_content.json", self.txt_capcut_draft.text().strip(), "JSON Files (*.json);;All Files (*.*)")
+        if f:
+            self.txt_capcut_draft.setText(f)
             self.save_user_config()
 
     def browse_output_directory(self):
@@ -1336,6 +1356,7 @@ class MainWindowV2(QMainWindow):
         ref_aud = self.txt_ref_audio.text().strip()
         ref_txt = self.txt_ref_text.text().strip()
         enable_tts = self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True
+        group_srt = self.chk_group_srt.isChecked() if hasattr(self, 'chk_group_srt') else False
 
         missing_fields = []
         if not link:
@@ -1405,7 +1426,8 @@ class MainWindowV2(QMainWindow):
             enable_tts=enable_tts,
             gradio_url=gradio,
             ref_audio_path=ref_aud,
-            ref_text=ref_txt
+            ref_text=ref_txt,
+            group_srt=group_srt
         )
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_progress)

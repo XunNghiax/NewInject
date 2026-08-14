@@ -74,7 +74,7 @@ def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = pr
                 btn = page.locator(sel).first
                 if btn.is_visible(timeout=500):
                     btn.click()
-                    log_callback("🚀 Đã gửi nạp Prompt dịch thuật thành công.")
+                    log_callback("🚀 Đã nạp Prompt thành công.")
                     clicked_send = True
                     break
                     
@@ -334,7 +334,7 @@ def create_browser_context(p, profile_folder: str, prompt_file: str, log_callbac
         log_callback(f"⚠️ CẢNH BÁO TRƯỚC KHI GỬI PROMPT: Profile [{profile_folder}] bị hạ cấp ({model_name})!", "warning")
         return browser, page, status
 
-    log_callback(f"✅ XÁC NHẬN MÔ HÌNH HỢP LỆ: {model_name} 🚀 -> Tiến hành nạp Prompt dịch mẫu...", "success")
+    log_callback(f"✅ XÁC NHẬN MÔ HÌNH HỢP LỆ: {model_name} 🚀 -> Tiến hành nạp Prompt ...", "success")
     send_initial_prompt(page, prompt_file, log_callback, check_pause_callback=check_pause_callback)
     return browser, page, status
 
