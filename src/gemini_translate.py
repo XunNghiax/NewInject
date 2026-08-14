@@ -48,7 +48,7 @@ def send_initial_prompt(page, prompt_file_path: str, log_callback: Callable = pr
         try:
             with open(prompt_file_path, 'r', encoding='utf-8') as f:
                 prompt_content = f.read().strip()
-            log_callback(f"📜 Đang nạp mẫu Prompt dịch thuật từ: {prompt_file_path}...")
+            log_callback(f"📜 Đang nạp Prompt từ: {prompt_file_path}...")
             
             chat_box = page.locator('div[contenteditable="true"]').first
             chat_box.wait_for(state="visible", timeout=15000)
