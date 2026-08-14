@@ -163,79 +163,94 @@ class CapCutBackend:
             audio_out_dir = self.cfg['AUDIO_OUT_DIR']
             os.makedirs(audio_out_dir, exist_ok=True)
 
-            # 2. Xóa toàn bộ file cũ trong thư mục
-            self.log_fn("🧹 Đang dọn dẹp thư mục chứa audio cũ để tránh trùng lặp...")
-            for filename in os.listdir(audio_out_dir):
-                file_path = os.path.join(audio_out_dir, filename)
-                try:
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path) # Xóa file
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path) # Xóa thư mục con (nếu có)
-                except Exception as e:
-                    self.log_fn(f"⚠️ Không thể xóa {file_path}. Lỗi: {e}")
-            
-            self.log_fn("✨ Thư mục lưu audio đã trống, sẵn sàng tạo file mới.")
-
-            try:
-                client = Client(self.cfg['SERVER_URL'])
-                client.timeout = 120
-                uploaded_ref = handle_file(self.cfg['REF_AUDIO_PATH'])
-            except Exception as e:
-                raise RuntimeError(f"Thất bại khi kết nối Gradio: {e}")
-
-            def generate_voice_clip(item, index):
-                text = item['text']
-                MAX_RETRIES = 3
-                attempt = 0
-                
-                while attempt <= MAX_RETRIES:
-                    if attempt == 0:
-                        self.log_fn(f"⏳ [Luồng chạy] Gửi dòng {index:03d}/{total_items}: \"{text[:30]}...\"")
-                    else:
-                        self.log_fn(f"🔄 [Thử lại {attempt}/{MAX_RETRIES}] Dòng {index:03d} gặp sự cố...")
-                    
+            # 2. Thay vì xóa, Quét kiểm tra các file đã tồn tại
+            self.log_fn("🔍 Đang kiểm tra thư mục voice để resume tiến trình nếu có...")
+            missing_items = []
+            for i, itm in enumerate(items_to_process, 1):
+                wav_path = os.path.join(audio_out_dir, f"clip_{i:03d}.wav")
+                itm['index'] = i  # Lưu index gốc để tạo đúng tên file
+                if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
                     try:
-                        result = client.predict(
-                            text=text, lang="Vietnamese", ref_aud=uploaded_ref, ref_text=self.cfg['REF_TEXT'], 
-                            instruct="", ns=32, gs=2.0, dn=True, sp=1.0, du=0, pp=True, po=True, api_name="/_clone_fn"
-                        )
-                        final_wav_path = os.path.join(self.cfg['AUDIO_OUT_DIR'], f"clip_{index:03d}.wav")
-                        
-                        audio = AudioSegment.from_file(result[0])
-                        non_silent = detect_nonsilent(audio, min_silence_len=50, silence_thresh=-40)
-                        if non_silent:
-                            #Khoảng trống cuối Wav
-                            audio = audio[non_silent[0][0]:min(len(audio), non_silent[-1][1] + 125)]
-                            audio = audio.fade_out(50)
-                        
-                        audio.export(final_wav_path, format="wav")
-                        
-                        if os.path.exists(final_wav_path) and os.path.getsize(final_wav_path) > 0:
-                            dur_ms = len(AudioSegment.from_file(final_wav_path))
-                            self.log_fn(f"✨ [Thành công] Dòng {index:03d} -> {os.path.basename(final_wav_path)} ({dur_ms}ms)")
-                            item['path'] = final_wav_path
-                            item['actual_duration_ms'] = dur_ms
-                            return item
-                        else:
-                            raise FileNotFoundError("Voice sinh ra bị trống.")
-                    except Exception as e:
-                        attempt += 1
-                        if attempt <= MAX_RETRIES:
-                            time.sleep(1.5)
-                        else:
-                            self.log_fn(f"❌ [LỖI] Dòng {index:03d} thất bại: {e}")
-                            return None
+                        dur_ms = len(AudioSegment.from_file(wav_path))
+                        itm['path'] = wav_path
+                        itm['actual_duration_ms'] = dur_ms
+                        audio_data.append(itm)
+                        self.log_fn(f"✨ [Resume] Tìm thấy file đã tạo -> clip_{i:03d}.wav ({dur_ms}ms)")
+                    except Exception:
+                        missing_items.append(itm)
+                else:
+                    missing_items.append(itm)
 
-            done_count = 0
-            MAX_WORKERS = 6
-            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = {executor.submit(generate_voice_clip, itm, i): i for i, itm in enumerate(items_to_process, 1)}
-                for future in concurrent.futures.as_completed(futures):
-                    res = future.result()
-                    if res: audio_data.append(res)
-                    done_count += 1
-                    self.progress_fn(done_count, total_items, "Tạo giọng nói AI")
+            # Sắp xếp lại audio_data theo đúng index ban đầu
+            audio_data.sort(key=lambda x: x.get('index', 0))
+
+            if not missing_items:
+                self.log_fn("⏩ Tiến trình voice đã hoàn tất 100% trước đó, bỏ qua gọi Gradio API!")
+            else:
+                self.log_fn(f"🔄 Tiến hành tạo {len(missing_items)} voice còn thiếu thông qua Gradio...")
+                try:
+                    client = Client(self.cfg['SERVER_URL'])
+                    client.timeout = 120
+                    uploaded_ref = handle_file(self.cfg['REF_AUDIO_PATH'])
+                except Exception as e:
+                    raise RuntimeError(f"Thất bại khi kết nối Gradio: {e}")
+
+                def generate_voice_clip(item):
+                    index = item['index']
+                    text = item['text']
+                    MAX_RETRIES = 3
+                    attempt = 0
+                    
+                    while attempt <= MAX_RETRIES:
+                        if attempt == 0:
+                            self.log_fn(f"⏳ [Luồng chạy] Gửi dòng {index:03d}/{total_items}: \"{text[:30]}...\"")
+                        else:
+                            self.log_fn(f"🔄 [Thử lại {attempt}/{MAX_RETRIES}] Dòng {index:03d} gặp sự cố...")
+                        
+                        try:
+                            result = client.predict(
+                                text=text, lang="Vietnamese", ref_aud=uploaded_ref, ref_text=self.cfg['REF_TEXT'], 
+                                instruct="", ns=32, gs=2.0, dn=True, sp=1.0, du=0, pp=True, po=True, api_name="/_clone_fn"
+                            )
+                            final_wav_path = os.path.join(self.cfg['AUDIO_OUT_DIR'], f"clip_{index:03d}.wav")
+                            
+                            audio = AudioSegment.from_file(result[0])
+                            non_silent = detect_nonsilent(audio, min_silence_len=50, silence_thresh=-40)
+                            if non_silent:
+                                audio = audio[non_silent[0][0]:min(len(audio), non_silent[-1][1] + 125)]
+                                audio = audio.fade_out(50)
+                            
+                            audio.export(final_wav_path, format="wav")
+                            
+                            if os.path.exists(final_wav_path) and os.path.getsize(final_wav_path) > 0:
+                                dur_ms = len(AudioSegment.from_file(final_wav_path))
+                                self.log_fn(f"✨ [Thành công] Dòng {index:03d} -> {os.path.basename(final_wav_path)} ({dur_ms}ms)")
+                                item['path'] = final_wav_path
+                                item['actual_duration_ms'] = dur_ms
+                                return item
+                            else:
+                                raise FileNotFoundError("Voice sinh ra bị trống.")
+                        except Exception as e:
+                            attempt += 1
+                            if attempt <= MAX_RETRIES:
+                                time.sleep(1.5)
+                            else:
+                                self.log_fn(f"❌ [LỖI] Dòng {index:03d} thất bại: {e}")
+                                return None
+
+                done_count = len(items_to_process) - len(missing_items)
+                MAX_WORKERS = 6
+                with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    futures = {executor.submit(generate_voice_clip, itm): itm for itm in missing_items}
+                    for future in concurrent.futures.as_completed(futures):
+                        res = future.result()
+                        if res: 
+                            audio_data.append(res)
+                        done_count += 1
+                        self.progress_fn(done_count, total_items, "Tạo giọng nói AI")
+                
+                # Sắp xếp lại audio_data một lần nữa để đảm bảo tính tuyến tính
+                audio_data.sort(key=lambda x: x.get('index', 0))
 
         else:
             self.log_fn("\n------------------------")
