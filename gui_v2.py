@@ -756,6 +756,7 @@ class MainWindowV2(QMainWindow):
         self.txt_gradio_url.setObjectName("MasterInput")
         self.txt_gradio_url.setPlaceholderText("Link Gradio mới...")
         self.txt_gradio_url.editingFinished.connect(self.save_user_config)
+        self.txt_gradio_url.editingFinished.connect(self.on_ping_gradio)
         self.txt_gradio_url.textChanged.connect(self.auto_ping_gradio)
 
         self.btn_paste_gradio = QToolButton()
@@ -1176,6 +1177,7 @@ class MainWindowV2(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self.on_run_clicked)
         QShortcut(QKeySequence("Ctrl+P"), self).activated.connect(self.on_pause_clicked)
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self.clear_console)
+        QShortcut(QKeySequence("F5"), self).activated.connect(self.restart_app)
 
     def set_badge_style(self, label: QLabel, bg_color: str, text_color: str = "white"):
         label.setStyleSheet(f"background-color: {bg_color}; color: {text_color}; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid {bg_color}; min-height: 28px; max-height: 28px; height: 28px;")
@@ -1202,13 +1204,17 @@ class MainWindowV2(QMainWindow):
         else:
             QMessageBox.warning(self, "Không Tìm Thấy CapCut", "Không tự động định vị được thư mục CapCut Draft. Vui lòng bấm 'Chọn Draft' thủ công!")
 
-    def on_ping_gradio(self):
+    def on_ping_gradio(self, *args):
         url = self.txt_gradio_url.text().strip()
         if not url:
-            QMessageBox.warning(self, "Thiếu URL Gradio", "Vui lòng nhập đường dẫn Gradio Server trước khi Ping!")
+            self.lbl_gradio_status.setText("⚪ Chưa kiểm tra")
+            self.set_badge_style(self.lbl_gradio_status, "#334155", "#94a3b8")
             return
         try:
-            res = requests.get(url, timeout=4)
+            self.lbl_gradio_status.setText("⏳ Đang Ping...")
+            self.set_badge_style(self.lbl_gradio_status, "#d97706", "white")
+            QApplication.processEvents() # Force UI update before ping
+            res = requests.get(url, timeout=2)
             if res.status_code in [200, 301, 302]:
                 self.lbl_gradio_status.setText("🟢 Online")
                 self.set_badge_style(self.lbl_gradio_status, "#059669", "white")
@@ -1384,6 +1390,7 @@ class MainWindowV2(QMainWindow):
         if text:
             self.txt_gradio_url.setText(text)
             self.save_user_config()
+            self.on_ping_gradio()
 
     def on_login_bilibili_clicked(self):
         if hasattr(self, 'btn_login_bilibili'):
@@ -1661,6 +1668,12 @@ class MainWindowV2(QMainWindow):
     def clear_console(self):
         self.logs_history.clear()
         self.txt_console.clear()
+
+    def restart_app(self):
+        self.append_log("🔄 Đang khởi động lại phần mềm (Fast Restart) để nạp code mới...", "info")
+        import sys
+        QApplication.quit()
+        os.execl(sys.executable, sys.executable, *sys.argv)
 
     def copy_logs(self):
         plain_text = self.txt_console.toPlainText()
