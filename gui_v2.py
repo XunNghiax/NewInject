@@ -1290,8 +1290,24 @@ class MainWindowV2(QMainWindow):
                 "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
                 "autoscroll": self.chk_autoscroll.isChecked() if hasattr(self, 'chk_autoscroll') else True
             }
+            existing = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except Exception:
+                    pass
+            existing.update(cfg)
+            
+            # Map chéo về chuẩn V1 để UI cũ cũng đọc được
+            existing['CAPCUT_JSON_PATH'] = cfg['last_draft']
+            existing['SERVER_URL'] = cfg['last_gradio_url']
+            existing['REF_AUDIO_PATH'] = cfg['last_ref_audio']
+            existing['REF_TEXT'] = cfg['last_ref_text']
+            existing['INJECT_ONLY'] = not cfg['enable_tts']
+
             with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                json.dump(existing, f, ensure_ascii=False, indent=4)
         except Exception:
             pass
 

@@ -82,6 +82,14 @@ def load_user_config():
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 saved = json.load(f)
+                
+                # Map V2 keys to V1 
+                if "last_draft" in saved: saved['CAPCUT_JSON_PATH'] = saved["last_draft"]
+                if "last_gradio_url" in saved: saved['SERVER_URL'] = saved["last_gradio_url"]
+                if "last_ref_audio" in saved: saved['REF_AUDIO_PATH'] = saved["last_ref_audio"]
+                if "last_ref_text" in saved: saved['REF_TEXT'] = saved["last_ref_text"]
+                if "enable_tts" in saved: saved['INJECT_ONLY'] = not saved["enable_tts"]
+
                 for k, v in DEFAULT_CONFIG.items():
                     if k not in saved:
                         saved[k] = v
@@ -92,8 +100,25 @@ def load_user_config():
 
 def save_user_config(config_dict):
     try:
+        existing = {}
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    existing = json.load(f)
+            except:
+                pass
+        
+        existing.update(config_dict)
+        
+        # Sync V1 keys to V2 standard
+        existing["last_draft"] = config_dict.get('CAPCUT_JSON_PATH', "")
+        existing["last_gradio_url"] = config_dict.get('SERVER_URL', "")
+        existing["last_ref_audio"] = config_dict.get('REF_AUDIO_PATH', "")
+        existing["last_ref_text"] = config_dict.get('REF_TEXT', "")
+        existing["enable_tts"] = not config_dict.get('INJECT_ONLY', False)
+
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config_dict, f, ensure_ascii=False, indent=4)
+            json.dump(existing, f, ensure_ascii=False, indent=4)
     except Exception as e:
         print(f"Không thể ghi nhớ cấu hình: {e}")
 
