@@ -131,7 +131,7 @@ class ProcessWorker(QThread):
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
     request_gradio_link_signal = pyqtSignal() # Yêu cầu người dùng nhập link Gradio khi tới Bước 5
 
-    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = "", group_srt: bool = False, fast_forward_mode: bool = False):
+    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = "", fast_forward_mode: bool = False):
         super().__init__()
         self.fast_forward_mode = fast_forward_mode
         self.link = link
@@ -149,7 +149,6 @@ class ProcessWorker(QThread):
         self.gradio_url = gradio_url.strip() if gradio_url else ""
         self.ref_audio_path = ref_audio_path
         self.ref_text = ref_text
-        self.group_srt = group_srt
         self._is_paused = False
         self._is_stopped = False
         self.downloader = None
@@ -465,7 +464,6 @@ class ProcessWorker(QThread):
                             "SERVER_URL": self.gradio_url,
                             "REF_AUDIO_PATH": self.ref_audio_path,
                             "REF_TEXT": self.ref_text,
-                            "GROUP_SRT": self.group_srt,
                             "SPEED_RATIO": 1.25
                         }
                         backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg))
@@ -870,14 +868,9 @@ class MainWindowV2(QMainWindow):
         self.chk_enable_tts.setObjectName("PurpleCheck")
         self.chk_enable_tts.toggled.connect(self.save_user_config)
         
-        self.chk_group_srt = QCheckBox("🗜️ Gộp phụ đề (Group SRT)")
-        self.chk_group_srt.setChecked(False)
-        self.chk_group_srt.setObjectName("NormalCheck")
-        self.chk_group_srt.toggled.connect(self.save_user_config)
         
         check_row.addWidget(self.chk_auto_inject_capcut)
         check_row.addWidget(self.chk_enable_tts)
-        check_row.addWidget(self.chk_group_srt)
         check_row.addStretch()
         card1_layout.addLayout(check_row)
 
@@ -1040,7 +1033,15 @@ class MainWindowV2(QMainWindow):
         self.global_progress_bar.setValue(0)
         self.global_progress_bar.setFixedHeight(12)
         self.global_progress_bar.setTextVisible(False)
-        self.global_progress_bar.setStyleSheet("QProgressBar { border: none; border-radius: 6px; background: #0f172a; box-shadow: inset 0 1px 2px rgba(0,0,0,0.5); } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 6px; }")
+        self.global_progress_bar.setStyleSheet("QProgressBar { border: none; border-radius: 6px; background: #0f172a; } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 6px; }")
+        
+        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+        from PyQt6.QtGui import QColor
+        shadow_global = QGraphicsDropShadowEffect()
+        shadow_global.setBlurRadius(10)
+        shadow_global.setColor(QColor(0, 0, 0, 200))
+        shadow_global.setOffset(0, 2)
+        self.global_progress_bar.setGraphicsEffect(shadow_global)
 
         lbl_local = QLabel("🎯 Tiến độ Bước Hiện Tại (Local):")
         lbl_local.setStyleSheet("color: #94a3b8; font-size: 11px;")
@@ -1059,7 +1060,13 @@ class MainWindowV2(QMainWindow):
         self.local_progress_bar.setValue(0)
         self.local_progress_bar.setFixedHeight(12)
         self.local_progress_bar.setTextVisible(False)
-        self.local_progress_bar.setStyleSheet("QProgressBar { border: none; border-radius: 6px; background: #0f172a; box-shadow: inset 0 1px 2px rgba(0,0,0,0.5); } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #34d399); border-radius: 6px; }")
+        self.local_progress_bar.setStyleSheet("QProgressBar { border: none; border-radius: 6px; background: #0f172a; } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #34d399); border-radius: 6px; }")
+        
+        shadow_local = QGraphicsDropShadowEffect()
+        shadow_local.setBlurRadius(10)
+        shadow_local.setColor(QColor(0, 0, 0, 200))
+        shadow_local.setOffset(0, 2)
+        self.local_progress_bar.setGraphicsEffect(shadow_local)
 
         progress_layout.addLayout(global_label_layout)
         progress_layout.addWidget(self.global_progress_bar)
@@ -1251,9 +1258,6 @@ class MainWindowV2(QMainWindow):
                     self.txt_ref_text.setText(last_ref_txt)
                 if hasattr(self, 'chk_enable_tts'):
                     self.chk_enable_tts.setChecked(enable_tts)
-                group_srt = self.user_cfg.get("group_srt", False)
-                if hasattr(self, 'chk_group_srt'):
-                    self.chk_group_srt.setChecked(group_srt)
                 if hasattr(self, 'chk_auto_inject_capcut'):
                     self.chk_auto_inject_capcut.setChecked(auto_inject_capcut)
                 if hasattr(self, 'chk_autoscroll'):
@@ -1277,7 +1281,6 @@ class MainWindowV2(QMainWindow):
                 "last_ref_audio": self.txt_ref_audio.text().strip(),
                 "last_ref_text": self.txt_ref_text.text().strip(),
                 "enable_tts": self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True,
-                "group_srt": self.chk_group_srt.isChecked() if hasattr(self, 'chk_group_srt') else False,
                 "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
                 "autoscroll": self.chk_autoscroll.isChecked() if hasattr(self, 'chk_autoscroll') else True
             }
@@ -1415,7 +1418,6 @@ class MainWindowV2(QMainWindow):
         ref_aud = self.txt_ref_audio.text().strip()
         ref_txt = self.txt_ref_text.text().strip()
         enable_tts = self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True
-        group_srt = self.chk_group_srt.isChecked() if hasattr(self, 'chk_group_srt') else False
 
         missing_fields = []
         if not link:
@@ -1501,7 +1503,6 @@ class MainWindowV2(QMainWindow):
             gradio_url=gradio,
             ref_audio_path=ref_aud,
             ref_text=ref_txt,
-            group_srt=group_srt,
             fast_forward_mode=fast_forward
         )
         self.worker.log_signal.connect(self.append_log)

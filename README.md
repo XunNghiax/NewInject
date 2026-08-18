@@ -110,7 +110,7 @@ flowchart LR
 
 1. **Trích xuất phụ đề**: Chọn file Video/Audio -> Nhấn **Tạo phụ đề** bằng Faster-Whisper.
 2. **Dịch phụ đề**: Tải file `.srt` lên tab Dịch thuật -> Nhập **Gemini API Key** -> Chọn ngôn ngữ dịch -> Nhấn **Bắt đầu dịch**.
-3. **Sửa lỗi phụ đề (QA)**: Chạy kiểm tra tự động để gộp các câu ngắn hoặc cắt câu quá dài.
+3. **Sửa lỗi phụ đề (QA)**: Chạy kiểm tra tự động để chuẩn hoá phụ đề.
 4. **Nhúng vào CapCut**:
    - Chọn thư mục **Draft CapCut** (Thường ở `C:\Users\<Tên_User>\AppData\Local\CapCut\User Data\Projects\com.lveditor.draft`).
    - Chọn file `.srt` đã dịch.

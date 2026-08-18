@@ -48,7 +48,6 @@ DEFAULT_CONFIG = {
     ),
     'SPEED_RATIO': 1.25,
     'INJECT_ONLY': False,
-    'GROUP_SRT': False,
     'SPEED_TOOL_IN_FILE': "",
     'SPEED_TOOL_OUT_FILE': "",
     'SPEED_TOOL_OLD_SPEED': 0.7,
@@ -276,18 +275,13 @@ class CapCutInjectorGUI(QMainWindow):
         self.inject_mode_combo = QComboBox()
         self.inject_mode_combo.addItems([
             "🎙️ Tạo giọng AI + ✂️ Đa Track (Giữ nguyên Timeline gốc)",
-            "🎙️ Tạo giọng AI + 🔗 Gộp Câu (Dãn Timeline thành 1 Track)",
-            "🎙️ Chỉ bơm Audio có sẵn + ✂️ Đa Track (Bỏ qua AI)",
-            "🎙️ Chỉ bơm Audio có sẵn + 🔗 Gộp Câu (Bỏ qua AI)"
+            "🎙️ Chỉ bơm Audio có sẵn + ✂️ Đa Track (Bỏ qua AI)"
         ])
         
         # Khôi phục trạng thái từ file config
         is_inject = self.user_cfg.get('INJECT_ONLY', False)
-        is_group = self.user_cfg.get('GROUP_SRT', False)
-        if not is_inject and not is_group: self.inject_mode_combo.setCurrentIndex(0)
-        elif not is_inject and is_group: self.inject_mode_combo.setCurrentIndex(1)
-        elif is_inject and not is_group: self.inject_mode_combo.setCurrentIndex(2)
-        elif is_inject and is_group: self.inject_mode_combo.setCurrentIndex(3)
+        if not is_inject: self.inject_mode_combo.setCurrentIndex(0)
+        else: self.inject_mode_combo.setCurrentIndex(1)
 
         self.inject_mode_combo.currentIndexChanged.connect(self.toggle_inject_only_mode)
         inject_layout.addWidget(self.inject_mode_combo)
@@ -1237,8 +1231,7 @@ class CapCutInjectorGUI(QMainWindow):
     def start_process(self):
 
         idx = self.inject_mode_combo.currentIndex()
-        is_inject_only = (idx == 2 or idx == 3)
-        is_group_srt = (idx == 1 or idx == 3)
+        is_inject_only = (idx == 1)
         
         current_config = {
             'SRT_FILE_PATH': self.srt_input.text(), 
@@ -1249,7 +1242,6 @@ class CapCutInjectorGUI(QMainWindow):
             'REF_TEXT': self.ref_text_input.toPlainText(),
             'SPEED_RATIO': self.speed_spin.value(),
             'INJECT_ONLY': is_inject_only,
-            'GROUP_SRT': is_group_srt
         }
         
         if not os.path.exists(current_config['SRT_FILE_PATH']):

@@ -26,9 +26,8 @@ dist/
 .pytest_cache/
 .mypy_cache/
 
+
 # Chrome data (nếu chỉ chứa dữ liệu tạm)
-chrome_data_1/
-chrome_data_2/
-chrome_data_3/
+chrome_profiles/
 downloads/
 
