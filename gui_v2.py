@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QFileDialog, QTabWidget, QScrollArea,
     QSizePolicy
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QTimer, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QTimer, QUrl, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QTextCursor, QKeySequence, QShortcut, QDesktopServices
 
 # Thêm thư mục src vào sys.path để import modul
@@ -325,6 +325,7 @@ class ProcessWorker(QThread):
                     self.emit_log(f"✅ Đã tìm thấy thư mục phụ đề gốc: {cn_folder}", "info")
     
                 # ── BƯỚC 3: DỊCH THUẬT AI & SO KHỚP TIMECODE 100% ──
+                self.emit_progress(0, "Chuẩn bị dịch thuật AI...")
                 self.step_signal.emit(3)
                 self.global_progress_signal.emit(45, "3. Đang chạy Gemini AI dịch Tiếng Việt & kiểm tra Timecode...")
                 os.makedirs(vi_folder, exist_ok=True)
@@ -352,6 +353,7 @@ class ProcessWorker(QThread):
                             wait_time=300,
                             delay_time=15,
                             log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                            progress_callback=self.emit_progress,
                             check_pause_callback=self.check_pause
                         )
     
@@ -365,6 +367,7 @@ class ProcessWorker(QThread):
                 self.emit_log("💡 (Không tạo output.srt trung gian ở bước này để tránh nhầm lẫn với bản dịch chưa qua QA)", "info")
     
                 # ── BƯỚC 4: AUTO QA TRỰC TIẾP TRÊN TỪNG PART & SỬA TRONG THƯ MỤC FIXED ──
+                self.emit_progress(0, "Chuẩn bị Auto QA...")
                 self.step_signal.emit(4)
                 self.global_progress_signal.emit(65, "4. Đang kiểm tra QA & tự động sửa lỗi trực tiếp trên từng part...")
                 report_folder = os.path.join(root_downloads, f"temp_split_qa_reports_{raw_title}")
@@ -404,6 +407,7 @@ class ProcessWorker(QThread):
                         fixed_srt_folder=fixed_vi_folder,
                         profile_folder=self.profile_folder,
                         log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                        progress_callback=self.emit_progress,
                         check_pause_callback=self.check_pause
                     )
     
@@ -464,7 +468,7 @@ class ProcessWorker(QThread):
                             "GROUP_SRT": self.group_srt,
                             "SPEED_RATIO": 1.25
                         }
-                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=self.progress_signal.emit)
+                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg))
                         backend.ensure_capcut_closed()
                         backend.run_process(only_inject=not self.enable_tts)
                         self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")
@@ -827,6 +831,7 @@ class MainWindowV2(QMainWindow):
             self.txt_capcut_draft.setText(default_cp_path)
         self.txt_capcut_draft.setPlaceholderText("Thư mục com.lveditor.draft...")
         self.txt_capcut_draft.editingFinished.connect(self.save_user_config)
+        self.txt_capcut_draft.textChanged.connect(self.sync_capcut_draft_to_worker)
 
         self.btn_browse_draft = QToolButton()
         self.btn_browse_draft.setText("📂 Draft")
@@ -858,6 +863,7 @@ class MainWindowV2(QMainWindow):
         self.chk_auto_inject_capcut.setChecked(True)
         self.chk_auto_inject_capcut.setObjectName("AccentCheck")
         self.chk_auto_inject_capcut.toggled.connect(self.save_user_config)
+        self.chk_auto_inject_capcut.stateChanged.connect(self.sync_auto_inject_to_worker)
 
         self.chk_enable_tts = QCheckBox("🎙️ Kích hoạt tạo giọng AI (TTS Engine)")
         self.chk_enable_tts.setChecked(True)  # LUÔN MẶC ĐỊNH LÀ TRUE
@@ -1019,27 +1025,45 @@ class MainWindowV2(QMainWindow):
         
         lbl_global = QLabel("🌍 Tiến độ Tổng Thể (Global):")
         lbl_global.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        
+        self.lbl_global_pct = QLabel("0%")
+        self.lbl_global_pct.setStyleSheet("color: #3b82f6; font-size: 11px; font-weight: bold;")
+        self.lbl_global_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        
+        global_label_layout = QHBoxLayout()
+        global_label_layout.addWidget(lbl_global)
+        global_label_layout.addWidget(self.lbl_global_pct)
+
         self.global_progress_bar = QProgressBar()
         self.global_progress_bar.setObjectName("GlobalProgressBar")
         self.global_progress_bar.setRange(0, 100)
         self.global_progress_bar.setValue(0)
         self.global_progress_bar.setFixedHeight(12)
         self.global_progress_bar.setTextVisible(False)
-        self.global_progress_bar.setStyleSheet("QProgressBar { border: 1px solid #334155; border-radius: 4px; background: #1e293b; } QProgressBar::chunk { background-color: #3b82f6; border-radius: 3px; }")
+        self.global_progress_bar.setStyleSheet("QProgressBar { border: none; border-radius: 6px; background: #0f172a; box-shadow: inset 0 1px 2px rgba(0,0,0,0.5); } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #8b5cf6); border-radius: 6px; }")
 
         lbl_local = QLabel("🎯 Tiến độ Bước Hiện Tại (Local):")
         lbl_local.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        
+        self.lbl_local_pct = QLabel("0%")
+        self.lbl_local_pct.setStyleSheet("color: #10b981; font-size: 11px; font-weight: bold;")
+        self.lbl_local_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        
+        local_label_layout = QHBoxLayout()
+        local_label_layout.addWidget(lbl_local)
+        local_label_layout.addWidget(self.lbl_local_pct)
+
         self.local_progress_bar = QProgressBar()
         self.local_progress_bar.setObjectName("LocalProgressBar")
         self.local_progress_bar.setRange(0, 100)
         self.local_progress_bar.setValue(0)
         self.local_progress_bar.setFixedHeight(12)
         self.local_progress_bar.setTextVisible(False)
-        self.local_progress_bar.setStyleSheet("QProgressBar { border: 1px solid #334155; border-radius: 4px; background: #1e293b; } QProgressBar::chunk { background-color: #10b981; border-radius: 3px; }")
+        self.local_progress_bar.setStyleSheet("QProgressBar { border: none; border-radius: 6px; background: #0f172a; box-shadow: inset 0 1px 2px rgba(0,0,0,0.5); } QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #34d399); border-radius: 6px; }")
 
-        progress_layout.addWidget(lbl_global)
+        progress_layout.addLayout(global_label_layout)
         progress_layout.addWidget(self.global_progress_bar)
-        progress_layout.addWidget(lbl_local)
+        progress_layout.addLayout(local_label_layout)
         progress_layout.addWidget(self.local_progress_bar)
         
         unified_console_layout.addLayout(progress_layout)
@@ -1452,6 +1476,9 @@ class MainWindowV2(QMainWindow):
 
         self.global_progress_bar.setValue(0)
         self.local_progress_bar.setValue(0)
+        if hasattr(self, 'lbl_global_pct'):
+            self.lbl_global_pct.setText("0%")
+            self.lbl_local_pct.setText("0%")
         self.update_kpi_value("kpi_percent", "0%", "#10b981")
         self.update_kpi_value("kpi_status", "Đang xử lý ⚡", "#6366f1")
         self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
@@ -1510,6 +1537,14 @@ class MainWindowV2(QMainWindow):
                 self.append_log(f"⚡ Đã phát hiện dán link Gradio: {text}. Tự động kiểm tra...", "info")
                 self.on_pause_clicked()
 
+    def sync_capcut_draft_to_worker(self):
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            self.worker.capcut_draft_path = self.txt_capcut_draft.text().strip()
+
+    def sync_auto_inject_to_worker(self):
+        if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
+            self.worker.auto_inject_capcut = self.chk_auto_inject_capcut.isChecked()
+
     def on_pause_clicked(self):
         if not self.worker or not self.worker.isRunning():
             return
@@ -1557,9 +1592,27 @@ class MainWindowV2(QMainWindow):
             self.lbl_system_badge.setText("❌ LỖI")
             self.set_badge_style(self.lbl_system_badge, "#dc2626", "white")
 
-    def update_progress(self, pct: int, status: str):
+    def update_local_progress(self, pct: int, status: str):
         if pct >= 0:
-            self.progress_bar.setValue(pct)
+            self.lbl_local_pct.setText(f"{pct}%")
+            self.anim_local = QPropertyAnimation(self.local_progress_bar, b"value")
+            self.anim_local.setDuration(400)
+            self.anim_local.setStartValue(self.local_progress_bar.value())
+            self.anim_local.setEndValue(pct)
+            self.anim_local.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self.anim_local.start()
+        # Tùy chọn: bạn có thể update KPI status ở cấp độ local nếu muốn
+        # self.update_kpi_value("kpi_status", status, "#38bdf8")
+
+    def update_global_progress(self, pct: int, status: str):
+        if pct >= 0:
+            self.lbl_global_pct.setText(f"{pct}%")
+            self.anim_global = QPropertyAnimation(self.global_progress_bar, b"value")
+            self.anim_global.setDuration(400)
+            self.anim_global.setStartValue(self.global_progress_bar.value())
+            self.anim_global.setEndValue(pct)
+            self.anim_global.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self.anim_global.start()
             self.update_kpi_value("kpi_percent", f"{pct}%", "#10b981")
         self.update_kpi_value("kpi_status", status, "#38bdf8")
 
