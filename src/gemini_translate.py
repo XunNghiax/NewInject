@@ -177,6 +177,17 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
     initial_count = page.locator('.model-response-text').count()
     uploaded = False
     
+    def highlight_element(element_locator, border="4px solid red", bg="yellow", sleep_time=1):
+        """Hàm giúp bôi màu phần tử trên trình duyệt để dễ quan sát"""
+        try:
+            page.evaluate(
+                f"(element) => {{ element.style.border = '{border}'; element.style.backgroundColor = '{bg}'; }}", 
+                element_locator.element_handle()
+            )
+            time.sleep(sleep_time)
+        except Exception:
+            pass
+
     log_callback(f"🔍 Đang chuẩn bị truyền file SRT: {os.path.basename(cn_file_path)}...")
     
     # 1. Thử Upload File
@@ -184,7 +195,7 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
         file_inputs = page.locator('input[type="file"]').all()
         for inp in file_inputs:
             try:
-                inp.set_files(cn_file_path)
+                inp.set_files(os.path.abspath(cn_file_path))
                 uploaded = True
                 log_callback(f"📎 Đã đính kèm tệp {os.path.basename(cn_file_path)} thành công qua input element!")
                 break
@@ -195,7 +206,7 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
 
     if not uploaded:
         try:
-            with page.expect_file_chooser(timeout=3000) as fc_info:
+            with page.expect_file_chooser(timeout=10000) as fc_info:
                 chat_box = page.locator('div[contenteditable="true"]').first
                 chat_box.wait_for(state="visible", timeout=3000)
                 box = chat_box.bounding_box()
@@ -215,9 +226,13 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
                                         closest_dist = dist
                                         target_btn = btn
                     if target_btn:
+                        log_callback("🔎 Phát hiện nút Thêm File (+), chuẩn bị click...")
+                        highlight_element(target_btn)
                         target_btn.click()
                     else:
-                        page.locator('button:left-of(div[contenteditable="true"])').first.click(timeout=2000)
+                        alt_btn = page.locator('button:left-of(div[contenteditable="true"])').first
+                        highlight_element(alt_btn)
+                        alt_btn.click(timeout=2000)
                     
                     time.sleep(1)
                     menu_items = page.locator('[role="menuitem"], [role="button"], mat-list-item').all()
@@ -225,11 +240,13 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
                         if item.is_visible():
                             t = item.inner_text().lower()
                             if "xuống" not in t and "drive" not in t and any(k in t for k in ["tải", "tệp", "máy tính", "computer", "upload", "file"]):
+                                log_callback("🔎 Chọn menu Tải lên từ máy tính...")
+                                highlight_element(item, border="3px solid blue", bg="#e3f2fd", sleep_time=1)
                                 item.click()
                                 break
 
             file_chooser = fc_info.value
-            file_chooser.set_files(cn_file_path)
+            file_chooser.set_files(os.path.abspath(cn_file_path))
             uploaded = True
             log_callback(f"📎 Đã nạp file .srt qua Hộp thoại File Chooser thành công!")
         except Exception:
@@ -247,6 +264,7 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
     # 3. Gửi tin nhắn
     try:
         chat_box = page.locator('div[contenteditable="true"]').first
+        highlight_element(chat_box, border="4px solid green", bg="#e8f5e9", sleep_time=0.5)
         chat_box.click()
         time.sleep(0.5)
 
@@ -279,10 +297,12 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
         time.sleep(1)
         
         send_selectors = [
-            'button[aria-label*="Gửi"]', 'button[aria-label*="gửi"]', 
-            'button[aria-label*="Send"]', 'button[aria-label*="send"]',
-            'button[mattooltip*="Gửi"]', 'button[mattooltip*="Send"]',
-            '[data-testid="send-button"]'
+            'button[aria-label*="gửi tin nhắn" i]', 
+            'button[aria-label*="send message" i]',
+            'button[aria-label*="gửi" i]:not([aria-label*="phản hồi"])',
+            'button[aria-label*="send" i]:not([aria-label*="feedback"])',
+            '[data-testid="send-button"]',
+            'button:has(svg):right-of(div[contenteditable="true"])'
         ]
         
         clicked_send = False
@@ -293,13 +313,9 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
                 elements = page.locator(sel).all()
                 for el in elements:
                     if el.is_visible() and el.is_enabled():
-                        # VISUAL DEBUG: Đánh dấu nút bấm bằng viền Đỏ, nền Vàng
-                        try:
-                            page.evaluate("(element) => { element.style.border = '4px solid red'; element.style.backgroundColor = 'yellow'; }", el.element_handle())
-                            time.sleep(1) # Dừng 1 giây để người dùng quan sát tận mắt
-                        except Exception:
-                            pass
-                        
+                        # VISUAL DEBUG: Highlight rực rỡ màu Xanh Dương/Tím để bạn nhìn rõ vị trí nút
+                        log_callback(f"🔎 Đã tìm thấy nút Gửi qua selector: {sel}")
+                        highlight_element(el, border="5px dashed #6200ea", bg="#b388ff", sleep_time=1.5)
                         el.click(timeout=1500)
                         clicked_send = True
                         break
@@ -312,16 +328,19 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
             time.sleep(1.5) # Đợi một lát nếu web lag chưa nạp xong nút Gửi
             
         if not clicked_send:
+            log_callback("⚠️ Không tìm thấy nút Gửi bằng selector chuẩn, tìm qua cấu trúc khung chat...")
             chat_container = page.locator('div').filter(has=chat_box).last
-            last_btn = chat_container.locator('button').last
-            if last_btn.is_visible(timeout=1000):
-                try:
-                    page.evaluate("(element) => { element.style.border = '4px solid red'; element.style.backgroundColor = 'yellow'; }", last_btn.element_handle())
-                    time.sleep(1)
-                except Exception:
-                    pass
-                last_btn.click()
-                clicked_send = True
+            all_btns = chat_container.locator('button').all()
+            for btn in reversed(all_btns):
+                if btn.is_visible(timeout=500):
+                    aria = btn.get_attribute("aria-label") or ""
+                    # Tránh bấm nhầm nút Xoá tệp (Remove) hoặc Micro
+                    if "xóa" not in aria.lower() and "remove" not in aria.lower() and "micro" not in aria.lower():
+                        log_callback("🔎 Highlight nút khả nghi là nút Gửi ở cuối khung chat...")
+                        highlight_element(btn, border="5px dashed #00c853", bg="#b2ff59", sleep_time=1.5)
+                        btn.click()
+                        clicked_send = True
+                        break
                 
         # AUTO-F5 Kiểm tra: Nếu sau khi click 2 giây mà text vẫn kẹt trong ô nhập liệu -> Lỗi Web
         time.sleep(2)
