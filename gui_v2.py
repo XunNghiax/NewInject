@@ -760,7 +760,7 @@ class MainWindowV2(QMainWindow):
         self.txt_gradio_url.textChanged.connect(self.auto_ping_gradio)
 
         self.btn_paste_gradio = QToolButton()
-        self.btn_paste_gradio.setText("📋 Dán")
+        self.btn_paste_gradio.setText("📋Dán")
         self.btn_paste_gradio.setObjectName("ToolBtnAccent")
         self.btn_paste_gradio.setFixedWidth(65)
         self.btn_paste_gradio.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -833,18 +833,18 @@ class MainWindowV2(QMainWindow):
         self.txt_capcut_draft.textChanged.connect(self.sync_capcut_draft_to_worker)
 
         self.btn_browse_draft = QToolButton()
-        self.btn_browse_draft.setText("📂 Draft")
+        self.btn_browse_draft.setText("📂Draft")
         self.btn_browse_draft.setObjectName("ToolBtn")
         self.btn_browse_draft.setMinimumWidth(75)
         self.btn_browse_draft.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_browse_draft.clicked.connect(self.browse_capcut_draft)
 
         self.btn_auto_detect_draft = QToolButton()
-        self.btn_auto_detect_draft.setText("🔍 Auto-Detect")
-        self.btn_auto_detect_draft.setObjectName("ToolBtnAccent")
-        self.btn_auto_detect_draft.setMinimumWidth(140)
+        self.btn_auto_detect_draft.setText("Dọn Wav")
+        self.btn_auto_detect_draft.setStyleSheet("QToolButton { background-color: #dc2626; color: white; border: 1px solid #ef4444; border-radius: 5px; font-weight: 700; font-size: 9.5pt; min-height: 28px; max-height: 28px; height: 28px; padding: 0 8px; } QToolButton:hover { background-color: #ef4444; border: 1px solid #f87171; }")
+        self.btn_auto_detect_draft.setMinimumWidth(90)
         self.btn_auto_detect_draft.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_auto_detect_draft.clicked.connect(self.on_auto_detect_capcut)
+        self.btn_auto_detect_draft.clicked.connect(self.on_clean_ai_draft)
 
         draft_box.addWidget(self.txt_capcut_draft, stretch=1)
         draft_box.addWidget(self.btn_browse_draft)
@@ -1195,14 +1195,56 @@ class MainWindowV2(QMainWindow):
                 self.btn_login_bilibili.setText("🍪 Bilibili : Chưa Login")
                 self.btn_login_bilibili.setStyleSheet("background-color: #334155; color: #cbd5e1; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid #475569; min-height: 28px; max-height: 28px; height: 28px;")
 
-    def on_auto_detect_capcut(self):
-        detected = get_default_capcut_path()
-        if detected:
-            self.txt_capcut_draft.setText(detected)
-            self.append_log(f"🔍 Đã tự động quét thấy CapCut Draft: {detected}", "success")
-            self.save_user_config()
-        else:
-            QMessageBox.warning(self, "Không Tìm Thấy CapCut", "Không tự động định vị được thư mục CapCut Draft. Vui lòng bấm 'Chọn Draft' thủ công!")
+    def on_clean_ai_draft(self):
+        draft_path = self.txt_capcut_draft.text().strip()
+        if not draft_path or not os.path.exists(draft_path):
+            QMessageBox.warning(self, "Lỗi", "Vui lòng chọn thư mục CapCut Draft hợp lệ trước khi Gỡ AI!")
+            return
+            
+        json_path = draft_path if draft_path.lower().endswith(".json") else os.path.join(draft_path, "draft_content.json")
+        if not os.path.exists(json_path):
+            QMessageBox.warning(self, "Lỗi", f"Không tìm thấy draft_content.json tại:\n{json_path}")
+            return
+            
+        reply = QMessageBox.question(self, "Xác Nhận", "Bạn có chắc chắn muốn dọn dẹp và GỠ BỎ toàn bộ âm thanh AI khỏi dự án CapCut này không?\n\n(Chỉ xóa AI do phần mềm tạo, tuyệt đối không ảnh hưởng đến âm thanh bạn tự ghép)", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.No: return
+        
+        try:
+            import json
+            import shutil
+            shutil.copy(json_path, json_path + ".clean.backup")
+            with open(json_path, "r", encoding="utf-8") as f:
+                draft = json.load(f)
+                
+            audio_materials_to_delete = set()
+            new_tracks = []
+            deleted_tracks = 0
+            
+            for track in draft.get("tracks", []):
+                if track.get("type") == "audio" and track.get("name", "").startswith("AI_Auto_Layer_"):
+                    deleted_tracks += 1
+                    for seg in track.get("segments", []):
+                        mat_id = seg.get("material_id")
+                        if mat_id: audio_materials_to_delete.add(mat_id)
+                else:
+                    new_tracks.append(track)
+                    
+            draft["tracks"] = new_tracks
+            
+            deleted_audios = 0
+            if "materials" in draft and "audios" in draft["materials"]:
+                old_audios = draft["materials"]["audios"]
+                new_audios = [a for a in old_audios if a.get("id") not in audio_materials_to_delete]
+                draft["materials"]["audios"] = new_audios
+                deleted_audios = len(old_audios) - len(new_audios)
+                
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(draft, f, ensure_ascii=False)
+                
+            self.append_log(f"🧹 Đã gỡ thành công {deleted_tracks} Track và {deleted_audios} khối âm thanh AI khỏi CapCut!", "success")
+            QMessageBox.information(self, "Hoàn Tất", f"Đã dọn dẹp dự án thành công!\n\n- Đã xóa {deleted_tracks} dòng Track (AI_Auto_Layer)\n- Đã xóa {deleted_audios} khối âm thanh (Media Lost)")
+        except Exception as e:
+            QMessageBox.critical(self, "Lỗi", f"Có lỗi xảy ra trong quá trình dọn dẹp: {e}")
 
     def on_ping_gradio(self, *args):
         url = self.txt_gradio_url.text().strip()
@@ -1290,8 +1332,24 @@ class MainWindowV2(QMainWindow):
                 "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
                 "autoscroll": self.chk_autoscroll.isChecked() if hasattr(self, 'chk_autoscroll') else True
             }
+            existing = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        existing = json.load(f)
+                except Exception:
+                    pass
+            existing.update(cfg)
+            
+            # Map chéo về chuẩn V1 để UI cũ cũng đọc được
+            existing['CAPCUT_JSON_PATH'] = cfg['last_draft']
+            existing['SERVER_URL'] = cfg['last_gradio_url']
+            existing['REF_AUDIO_PATH'] = cfg['last_ref_audio']
+            existing['REF_TEXT'] = cfg['last_ref_text']
+            existing['INJECT_ONLY'] = not cfg['enable_tts']
+
             with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
+                json.dump(existing, f, ensure_ascii=False, indent=4)
         except Exception:
             pass
 
