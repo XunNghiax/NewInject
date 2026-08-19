@@ -330,20 +330,35 @@ class ProcessWorker(QThread):
                 os.makedirs(vi_folder, exist_ok=True)
     
                 if run_auto_translate_srt:
-                    cn_files = [f for f in os.listdir(cn_folder) if f.endswith('.srt')]
-                    vi_files = [f for f in os.listdir(vi_folder) if f.endswith('.srt')]
+                    prompt_file = os.path.abspath("./user_data/prompts/promptTranslates.md")
+                    if not os.path.exists(prompt_file):
+                        prompt_file = os.path.abspath("./user_data/prompts/translate.txt")
+                    if not os.path.exists(prompt_file):
+                        os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
+                        with open(prompt_file, "w", encoding="utf-8") as pf:
+                            pf.write("Hãy dịch chính xác file SRT này sang Tiếng Việt. Giữ nguyên định dạng mốc thời gian.")
+
+                    MAX_GLOBAL_RETRIES = 3
+                    global_retry_count = 0
                     
-                    if len(cn_files) > 0 and len(cn_files) == len(vi_files):
-                        self.emit_log("⏩ Bỏ qua bước dịch thuật vì đã có đủ file phụ đề Tiếng Việt trong thư mục đích.", "info")
-                    else:
-                        prompt_file = os.path.abspath("./user_data/prompts/promptTranslates.md")
-                        if not os.path.exists(prompt_file):
-                            prompt_file = os.path.abspath("./user_data/prompts/translate.txt")
-                        if not os.path.exists(prompt_file):
-                            os.makedirs(os.path.dirname(prompt_file), exist_ok=True)
-                            with open(prompt_file, "w", encoding="utf-8") as pf:
-                                pf.write("Hãy dịch chính xác file SRT này sang Tiếng Việt. Giữ nguyên định dạng mốc thời gian.")
-        
+                    while global_retry_count < MAX_GLOBAL_RETRIES:
+                        cn_files = [f for f in os.listdir(cn_folder) if f.endswith('.srt')]
+                        vi_files = [f for f in os.listdir(vi_folder) if f.endswith('.srt')]
+                        
+                        if len(cn_files) > 0 and len(cn_files) <= len(vi_files):
+                            if global_retry_count == 0:
+                                self.emit_log("⏩ Bỏ qua bước dịch thuật vì đã có đủ file phụ đề Tiếng Việt trong thư mục đích.", "info")
+                            break
+                            
+                        if global_retry_count > 0:
+                            missing_files = []
+                            for cn_file in cn_files:
+                                expected_vi = cn_file.replace('_cn.srt', '_vi.srt')
+                                if expected_vi not in vi_files:
+                                    missing_files.append(expected_vi)
+                            self.emit_log(f"⚠️ Phát hiện thiếu {len(missing_files)} file: {', '.join(missing_files)}", "warning")
+                            self.emit_log(f"🔄 ĐANG TIẾN HÀNH QUÉT LẠI ĐỂ DỊCH BÙ (Lần quét thứ {global_retry_count}/{MAX_GLOBAL_RETRIES-1})...", "info")
+                        
                         run_auto_translate_srt(
                             prompt_file=prompt_file,
                             cn_folder=cn_folder,
@@ -355,14 +370,18 @@ class ProcessWorker(QThread):
                             progress_callback=self.emit_progress,
                             check_pause_callback=self.check_pause
                         )
-    
-                # CỔNG 1: Kiểm tra xem các file part tiếng Việt đã hoàn tất và khớp 100% timecode chưa
+                        global_retry_count += 1
+
+                # CỔNG 1: Kiểm tra chốt chặn đồng bộ
+                cn_parts = [f for f in os.listdir(cn_folder) if f.endswith('.srt')]
                 vi_parts = [f for f in os.listdir(vi_folder) if f.endswith('.srt')]
-                if not vi_parts:
-                    self.finished_signal.emit(False, "❌ Thất bại: Không có file phụ đề tiếng Việt nào được dịch hoàn tất!")
+                
+                if not vi_parts or len(vi_parts) < len(cn_parts):
+                    self.emit_log("❌ LỖI NGHIÊM TRỌNG: Đã quét dịch bù nhiều lần nhưng hệ thống AI vẫn bỏ sót file.", "error")
+                    self.finished_signal.emit(False, "❌ DỪNG TIẾN TRÌNH: Dịch thiếu file. Vui lòng kiểm tra lại log hoặc kết nối mạng!")
                     return
     
-                self.emit_log(f"✅ CỔNG 1 ĐẠT CHUẨN: Đã dịch và xác nhận khớp 100% mốc thời gian cho {len(vi_parts)} file phân đoạn tiếng Việt!", "success")
+                self.emit_log(f"✅ CỔNG 1 ĐẠT CHUẨN: Đã đồng bộ đầy đủ {len(vi_parts)}/{len(cn_parts)} file phân đoạn tiếng Việt!", "success")
                 self.emit_log("💡 (Không tạo output.srt trung gian ở bước này để tránh nhầm lẫn với bản dịch chưa qua QA)", "info")
     
                 # ── BƯỚC 4: AUTO QA TRỰC TIẾP TRÊN TỪNG PART & SỬA TRONG THƯ MỤC FIXED ──

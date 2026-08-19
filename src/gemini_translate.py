@@ -286,23 +286,55 @@ def upload_srt_and_send(page, cn_file_path: str, short_prompt: str, log_callback
         ]
         
         clicked_send = False
-        for sel in send_selectors:
-            elements = page.locator(sel).all()
-            for el in elements:
-                if el.is_visible():
-                    el.click(timeout=1500)
-                    clicked_send = True
+        
+        # Thử tìm và bấm nút với Visual Debug & Bấm dồn dập
+        for _ in range(3): # Thử bấm tối đa 3 chu kỳ nếu nút chưa phản hồi
+            for sel in send_selectors:
+                elements = page.locator(sel).all()
+                for el in elements:
+                    if el.is_visible() and el.is_enabled():
+                        # VISUAL DEBUG: Đánh dấu nút bấm bằng viền Đỏ, nền Vàng
+                        try:
+                            page.evaluate("(element) => { element.style.border = '4px solid red'; element.style.backgroundColor = 'yellow'; }", el.element_handle())
+                            time.sleep(1) # Dừng 1 giây để người dùng quan sát tận mắt
+                        except Exception:
+                            pass
+                        
+                        el.click(timeout=1500)
+                        clicked_send = True
+                        break
+                if clicked_send:
                     break
+            
             if clicked_send:
                 break
                 
+            time.sleep(1.5) # Đợi một lát nếu web lag chưa nạp xong nút Gửi
+            
         if not clicked_send:
             chat_container = page.locator('div').filter(has=chat_box).last
             last_btn = chat_container.locator('button').last
             if last_btn.is_visible(timeout=1000):
+                try:
+                    page.evaluate("(element) => { element.style.border = '4px solid red'; element.style.backgroundColor = 'yellow'; }", last_btn.element_handle())
+                    time.sleep(1)
+                except Exception:
+                    pass
                 last_btn.click()
+                clicked_send = True
                 
-        log_callback(f"🚀 Đã gửi nội dung SRT cần dịch tới Gemini AI thành công!")
+        # AUTO-F5 Kiểm tra: Nếu sau khi click 2 giây mà text vẫn kẹt trong ô nhập liệu -> Lỗi Web
+        time.sleep(2)
+        if chat_box.is_visible():
+            try:
+                remaining_text = chat_box.inner_text().strip()
+                if len(remaining_text) > 50:
+                    log_callback("⚠️ LỖI KẸT GỬI: Giao diện Gemini đóng băng, không nhận lệnh Click. Ép F5 tải lại...")
+                    return None # Trả về None để hệ thống tự động Reload trình duyệt
+            except Exception:
+                pass
+                
+        log_callback(f"🚀 Đã tìm thấy và click nút gửi thành công!")
         return initial_count
     except Exception as e:
         log_callback(f"❌ Lỗi gửi prompt dịch cho Gemini: {e}")
