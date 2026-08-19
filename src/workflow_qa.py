@@ -70,7 +70,7 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
         bot = GeminiBot(log_callback=log_callback)
         browser, page, model_status = bot.launch(p, current_profile, prompt_file, check_pause_callback)
         
-        if model_status == "FLASH_LITE":
+        while model_status == "FLASH_LITE":
             start_idx = current_profile_idx
             switched_ok = False
             while True:
@@ -94,7 +94,11 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
                 page.goto("https://gemini.google.com/app", timeout=60000)
                 page.wait_for_load_state("load")
                 time.sleep(5)
-                bot.send_initial_prompt(prompt_file, check_pause_callback=check_pause_callback)
+                status, _ = bot.check_model_status()
+                model_status = status
+                if model_status != "FLASH_LITE":
+                    bot.send_initial_prompt(prompt_file, check_pause_callback=check_pause_callback)
+                    break
 
         files_processed_in_session = 0
         BATCH_SIZE = 3
@@ -105,7 +109,7 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
             report_path = os.path.join(report_folder, file_name)
             
             status, model_name = bot.check_model_status()
-            if status == "FLASH_LITE":
+            while status == "FLASH_LITE":
                 log_callback(f"⚠️ Profile [{current_profile}] bị hạ cấp xuống Flash-Lite! Tự động chuyển Profile còn hạn mức Pro...", "warning")
                 record_profile_cooldown(current_profile, 5.0, log_callback)
                 
@@ -120,6 +124,7 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
                     browser, page, new_status = bot.launch(p, current_profile, prompt_file, check_pause_callback)
                     if new_status != "FLASH_LITE":
                         switched_ok = True
+                        status = new_status
                         log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG KHÔI PHỤC MODEL PRO! 🚀", "success")
 
                 if not switched_ok:
@@ -128,7 +133,11 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
                     page.goto("https://gemini.google.com/app", timeout=60000)
                     page.wait_for_load_state("load")
                     time.sleep(5)
-                    bot.send_initial_prompt(prompt_file, check_pause_callback=check_pause_callback)
+                    new_status, _ = bot.check_model_status()
+                    status = new_status
+                    if status != "FLASH_LITE":
+                        bot.send_initial_prompt(prompt_file, check_pause_callback=check_pause_callback)
+                        break
 
             if files_processed_in_session >= BATCH_SIZE:
                 log_callback(f"\n🔄 Đã hoàn thành 1 mẻ ({BATCH_SIZE} báo cáo). Đang làm mới phiên chat...")
@@ -174,16 +183,19 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
                 patch_text = clean_gemini_output(latest_response)
                 
                 log_callback(f"⚖️ Đang áp dụng các sửa đổi vào các file SRT...")
-                replace_blocks_in_folder(fixed_srt_folder, patch_text, log_callback)
+                replaced_count, deleted_count = replace_blocks_in_folder(fixed_srt_folder, patch_text, log_callback)
                 
-                try:
-                    repaired_name = os.path.splitext(file_name)[0] + "_da_sua.txt"
-                    repaired_path = os.path.join(report_folder, repaired_name)
-                    os.rename(report_path, repaired_path)
-                    log_callback(f"✅ Đã xử lý xong. Đổi tên file báo cáo trực tiếp thành '{repaired_name}' để lưu tiến trình.")
-                    files_processed_in_session += 1
-                except Exception as e:
-                    log_callback(f"⚠️ Lỗi khi đổi tên file báo cáo: {e}")
+                if replaced_count > 0 or deleted_count > 0:
+                    try:
+                        repaired_name = os.path.splitext(file_name)[0] + "_done.txt"
+                        repaired_path = os.path.join(report_folder, repaired_name)
+                        os.rename(report_path, repaired_path)
+                        log_callback(f"✅ Đã xử lý xong. Đổi tên file báo cáo trực tiếp thành '{repaired_name}' để lưu tiến trình.")
+                        files_processed_in_session += 1
+                    except Exception as e:
+                        log_callback(f"⚠️ Lỗi khi đổi tên file báo cáo: {e}")
+                else:
+                    log_callback("⚠️ CẢNH BÁO: Không có block nào được thay thế. Không đánh dấu hoàn thành để thử lại lần sau.")
             else:
                 log_callback(f"❌ Không lấy được phản hồi từ Gemini.")
 

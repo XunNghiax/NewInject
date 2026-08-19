@@ -805,10 +805,11 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
             # Dọn dẹp các file report cũ trước khi lưu báo cáo mới
             for old_f in os.listdir(out_dir):
                 if (old_f.lower().startswith('report_') or old_f.lower().startswith(f"{folder_name.lower()}_")) and old_f.lower().endswith('.txt'):
-                    try:
-                        os.remove(os.path.join(out_dir, old_f))
-                    except Exception:
-                        pass
+                    if not old_f.lower().endswith('_done.txt') and not old_f.lower().endswith('_da_sua.txt'):
+                        try:
+                            os.remove(os.path.join(out_dir, old_f))
+                        except Exception:
+                            pass
         
         timestamp_str  = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -1095,7 +1096,10 @@ def replace_blocks_in_folder(folder, patch_text, log_callback=print):
 
     if not replace_dict and not delete_set:
         log_callback("⚠️ Không tìm thấy block hợp lệ nào trong đoạn text đã dán.")
-        return
+        return 0, 0
+
+    total_replaced = 0
+    total_deleted = 0
 
     # Tự động nhận diện tiền tố
     prefix = detect_prefix(folder)
@@ -1185,6 +1189,8 @@ def replace_blocks_in_folder(folder, patch_text, log_callback=print):
 
         # Ghi đè nếu có thay đổi
         if replaced_count > 0 or deleted_count > 0:
+            total_replaced += replaced_count
+            total_deleted += deleted_count
             try:
                 with open(filepath, 'w', encoding='utf-8') as f:
                     f.write('\n\n'.join(new_blocks) + '\n\n')
@@ -1199,6 +1205,7 @@ def replace_blocks_in_folder(folder, patch_text, log_callback=print):
 
     log_callback("\n✅ Hoàn thành Batch Replace+Delete!")
     log_callback("⚠️  Nhớ chạy Reindex để đánh lại số thứ tự block sau khi xóa.")
+    return total_replaced, total_deleted
 
 
 # ==============================================================================
@@ -1219,7 +1226,7 @@ def replace_blocks_in_file(filepath, patch_text, log_callback=print):
 
     if not replace_dict and not delete_set:
         log_callback("⚠️ Không tìm thấy block hợp lệ nào trong đoạn text đã dán.")
-        return
+        return 0, 0
 
     filename = os.path.basename(filepath)
     log_callback(f"\n📄 Đang xử lý file đơn lẻ: {filename}")
@@ -1294,6 +1301,8 @@ def replace_blocks_in_file(filepath, patch_text, log_callback=print):
     else:
         log_callback("\n⚠️ Không có block nào được thay thế hoặc xóa "
                      "(Có thể ID không khớp với file gốc).")
+    
+    return replaced_count, deleted_count
 
 def clean_gemini_output(text: str) -> str:
     """Làm sạch kết quả đầu ra từ Gemini AI, trích xuất duy nhất nội dung trong code block SRT."""

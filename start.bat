@@ -1,8 +1,8 @@
 @echo off
-title CapcutInjector Pro - GUI v1 Launcher
+title CapcutInjector Pro - GUI v2 Launcher
 cd /d "%~dp0"
 echo ============================================================
-echo  Khoi chay CapcutInjector Pro v1
+echo  Khoi chay CapcutInjector...
 echo ============================================================
-.\venv\Scripts\python.exe gui.py
+.\venv\Scripts\python.exe gui_v2.py
 pause

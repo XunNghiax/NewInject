@@ -370,6 +370,13 @@ class ProcessWorker(QThread):
                 self.global_progress_signal.emit(65, "4. Đang kiểm tra QA & tự động sửa lỗi trực tiếp trên từng part...")
                 report_folder = os.path.join(root_downloads, f"temp_split_qa_reports_{raw_title}")
                 fixed_vi_folder = os.path.join(root_downloads, f"temp_split_vi_fixed_{raw_title}")
+                
+                # CẬP NHẬT: Kiểm tra xem tiến trình cũ có tồn tại không
+                is_resume = False
+                if os.path.exists(fixed_vi_folder) and any(f.endswith('.srt') for f in os.listdir(fixed_vi_folder)):
+                    is_resume = True
+                    self.emit_log("♻️ Phát hiện thư mục fixed đã tồn tại. Ưu tiên quét và xử lý lỗi tiếp trên thư mục này...", "info")
+                
                 os.makedirs(report_folder, exist_ok=True)
                 os.makedirs(fixed_vi_folder, exist_ok=True)
     
@@ -381,45 +388,56 @@ class ProcessWorker(QThread):
                         if not os.path.exists(dst_p):
                             shutil.copy2(src_p, dst_p)
     
-                # Quét phân tích lỗi QA lần 1
-                if analyze_srt_to_file:
-                    analyze_srt_to_file(vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
-    
-                # Kiểm tra xem có file báo cáo QA nào cần sửa không
-                report_files = [f for f in os.listdir(report_folder) if f.endswith('.txt') and not f.endswith('_da_sua.txt') and not f.endswith('.done') and ('report' in f.lower() or 'qa' in f.lower())]
-    
-                if report_files and run_auto_qa_repair:
-                    self.emit_log(f"🧹 Tìm thấy {len(report_files)} báo cáo lỗi QA. Tiến hành vá lỗi & gộp câu tự động...", "info")
-                    qa_prompt = os.path.abspath("./user_data/prompts/promptRepair.md")
-                    if not os.path.exists(qa_prompt):
-                        qa_prompt = os.path.abspath("./user_data/prompts/prompt_qa_repair.txt")
-                    if not os.path.exists(qa_prompt):
-                        os.makedirs(os.path.dirname(qa_prompt), exist_ok=True)
-                        with open(qa_prompt, "w", encoding="utf-8") as qf:
-                            qf.write("Hãy kiểm tra và sửa lỗi các câu phụ đề vượt quá độ dài hoặc đè timecode.")
-    
-                    run_auto_qa_repair(
-                        prompt_file=qa_prompt,
-                        report_folder=report_folder,
-                        original_srt_folder=vi_folder,
-                        fixed_srt_folder=fixed_vi_folder,
-                        profile_folder=self.profile_folder,
-                        log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
-                        progress_callback=self.emit_progress,
-                        check_pause_callback=self.check_pause
-                    )
-    
-                    # Quét lại (Re-scan) trên thư mục fixed_vi_folder để đảm bảo không còn lỗi nghiêm trọng
+                # Vòng lặp Iterative Healing
+                max_qa_passes = 2
+                for pass_idx in range(max_qa_passes):
+                    self.emit_log(f"🔄 Đang chạy vòng lặp QA lần {pass_idx + 1}/{max_qa_passes}...")
+                    
+                    # LOGIC ƯU TIÊN QUÉT: Nếu có resume thì quét luôn fixed_vi_folder ngay từ Pass 1
+                    if pass_idx == 0:
+                        analyze_src = fixed_vi_folder if is_resume else vi_folder
+                    else:
+                        analyze_src = fixed_vi_folder
+                    
                     if analyze_srt_to_file:
-                        rescan_report_folder = os.path.join(root_downloads, f"temp_split_qa_rescan_{raw_title}")
-                        os.makedirs(rescan_report_folder, exist_ok=True)
-                        re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, rescan_report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
-                        if re_crit == 0:
-                            self.emit_log(f"✅ RE-SCAN HOÀN HẢO: 0 Lỗi nghiêm trọng (Critical) sau khi sửa! (Còn {re_warn} cảnh báo nhỏ)", "success")
-                        else:
-                            self.emit_log(f"⚠️ RE-SCAN: Còn lại {re_crit} lỗi nghiêm trọng và {re_warn} cảnh báo.", "warning")
-                else:
-                    self.emit_log("✅ Phụ đề tiếng Việt đạt chuẩn chất lượng 100%, không phát hiện lỗi QA cần sửa!", "success")
+                        analyze_srt_to_file(analyze_src, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
+        
+                    report_files = [f for f in os.listdir(report_folder) if f.endswith('.txt') and not f.endswith('_da_sua.txt') and not f.endswith('_done.txt') and not f.endswith('.done') and ('report' in f.lower() or 'qa' in f.lower())]
+        
+                    if not report_files:
+                        self.emit_log("✅ Phụ đề tiếng Việt đạt chuẩn chất lượng 100%, không phát hiện lỗi QA nghiêm trọng cần sửa!", "success")
+                        break
+        
+                    if run_auto_qa_repair:
+                        self.emit_log(f"🧹 Tìm thấy {len(report_files)} báo cáo lỗi QA. Tiến hành vá lỗi & gộp câu tự động...", "info")
+                        qa_prompt = os.path.abspath("./user_data/prompts/promptRepair.md")
+                        if not os.path.exists(qa_prompt):
+                            qa_prompt = os.path.abspath("./user_data/prompts/prompt_qa_repair.txt")
+                        if not os.path.exists(qa_prompt):
+                            os.makedirs(os.path.dirname(qa_prompt), exist_ok=True)
+                            with open(qa_prompt, "w", encoding="utf-8") as qf:
+                                qf.write("Hãy kiểm tra và sửa lỗi các câu phụ đề vượt quá độ dài hoặc đè timecode.")
+        
+                        run_auto_qa_repair(
+                            prompt_file=qa_prompt,
+                            report_folder=report_folder,
+                            original_srt_folder=vi_folder,
+                            fixed_srt_folder=fixed_vi_folder,
+                            profile_folder=self.profile_folder,
+                            log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl),
+                            progress_callback=self.emit_progress,
+                            check_pause_callback=self.check_pause
+                        )
+        
+                        if analyze_srt_to_file:
+                            re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
+                            if re_crit == 0:
+                                self.emit_log(f"✅ RE-SCAN HOÀN HẢO: 0 Lỗi nghiêm trọng (Critical) sau khi sửa! (Còn {re_warn} cảnh báo nhỏ)", "success")
+                                break
+                            else:
+                                self.emit_log(f"⚠️ RE-SCAN: Còn lại {re_crit} lỗi nghiêm trọng và {re_warn} cảnh báo.", "warning")
+                                if pass_idx < max_qa_passes - 1:
+                                    self.emit_log("🔄 Đang chuyển sang vòng lặp sửa lỗi tiếp theo...", "info")
     
                 # ── CỔNG 3: XUẤT DUY NHẤT 1 FILE output.srt THÀNH PHẨM HOÀN HẢO ──
                 if merge_numbered_srt_files and os.path.exists(fixed_vi_folder) and os.listdir(fixed_vi_folder):

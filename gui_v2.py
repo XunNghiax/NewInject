@@ -63,7 +63,7 @@ except ImportError:
     split_srt_file = None
 
 try:
-    from gemini_core import get_available_profiles, create_new_profile, open_chrome_for_login, is_profile_logged_in
+    from src.gemini_bot import get_available_profiles, create_new_profile, open_chrome_for_login, is_profile_logged_in
 except ImportError:
     get_available_profiles = None
     create_new_profile = None
