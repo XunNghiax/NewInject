@@ -259,21 +259,31 @@ class CapCutBackend:
         GAP_MICRO = 0
         
         # --- PASS 1: TÍNH TOÁN TOẠ ĐỘ THỜI GIAN TRÊN RAM ---
+        ignore_timeline = self.cfg.get('IGNORE_TIMELINE', False)
+        current_time_micro = 0
+
         for clip in audio_data:
             orig_start = clip['original_start_ms'] * 1000
             actual_dur = clip['actual_duration_ms'] * 1000
             target_dur = int(actual_dur / speed_ratio)
+            
+            final_start = current_time_micro if ignore_timeline else orig_start
+
             timeline.append({
                 "orig_start": orig_start,
-                "final_start": orig_start,
+                "final_start": final_start,
                 "dur": target_dur,
                 "actual_dur": actual_dur,
                 "path": clip['path']
             })
             
-        for i in range(1, total_clips):
-            prev = timeline[i-1] # Đây là Block N-1
-            curr = timeline[i]   # Đây là Block N
+            if ignore_timeline:
+                current_time_micro += target_dur
+                
+        if not ignore_timeline:
+            for i in range(1, total_clips):
+                prev = timeline[i-1] # Đây là Block N-1
+                curr = timeline[i]   # Đây là Block N
             
             prev_end = prev['final_start'] + prev['dur']
             curr_start = curr['final_start']

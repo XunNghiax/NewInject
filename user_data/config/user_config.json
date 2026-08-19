@@ -1,11 +1,12 @@
 {
-    "SRT_FILE_PATH": "D:\\Coder\\Python\\NewInject\\downloads\\0808\\output.srt",
-    "REF_AUDIO_PATH": "D:\\Coder\\Python\\NewInject\\user_data\\source\\audiotst1.wav",
-    "AUDIO_OUT_DIR": "D:\\Coder\\Python\\NewInject\\downloads\\0808\\voice_我和高冷校花同时拥有读心术！",
-    "CAPCUT_JSON_PATH": "C:\\Users\\Xun_Nghiax\\AppData\\Local\\CapCut\\User Data\\Projects\\com.lveditor.draft\\0808\\draft_content.json",
-    "SERVER_URL": "",
-    "REF_TEXT": "Trong lĩnh vực công nghệ hiện nay, việc ứng dụng các mô hình ngôn ngữ lớn đang ngày càng trở nên phổ biến. Quá trình tối ưu hóa này đòi hỏi chúng ta phải hiểu rõ cấu trúc dữ liệu và cách hệ thống xử lý thông tin đầu vào.",
-    "SPEED_RATIO": 1.25,
-    "INJECT_ONLY": false,
-    "GROUP_SRT": false
+  "last_url": "https://drive.google.com/drive/folders/1RxoXQ711D0fmy-o9qxfxYNinj53e9AAn",
+  "last_dir": "D:/Coder/Python/NewInject/downloads/0818",
+  "last_draft": "C:/Users/Xun_Nghiax/AppData/Local/CapCut/User Data/Projects/com.lveditor.draft/0807/draft_content.json",
+  "last_profile": "chrome_data_1",
+  "last_gradio_url": "https://0db14ec64b25f6c78b.gradio.live",
+  "last_ref_audio": "D:/Coder/Python/NewInject/user_data/source/audiotst1.wav",
+  "last_ref_text": "Trong lĩnh vực công nghệ hiện nay, việc ứng dụng các mô hình ngôn ngữ lớn đang ngày càng trở nên phổ biến. Quá trình tối ưu hóa này đòi hỏi chúng ta phải hiểu rõ cấu trúc dữ liệu và cách hệ thống xử lý thông tin đầu vào.",
+  "enable_tts": true,
+  "auto_inject_capcut": true,
+  "autoscroll": true
 }

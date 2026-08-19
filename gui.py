@@ -310,6 +310,12 @@ class CapCutInjectorGUI(QMainWindow):
         speed_layout.addWidget(self.speed_spin)
         speed_layout.addStretch()
         layout.addWidget(self.speed_frame)
+        
+        self.ignore_timeline_chk = QCheckBox("🚊 Nhúng nối tiếp (Bỏ qua Timeline SRT gốc)")
+        self.ignore_timeline_chk.setStyleSheet("font-weight: bold; color: #fbbf24; margin-top: 5px; margin-bottom: 5px;")
+        self.ignore_timeline_chk.setChecked(self.user_cfg.get('IGNORE_TIMELINE', False))
+        layout.addWidget(self.ignore_timeline_chk)
+
 
         self.gradio_group = QGroupBox("Cấu hình AI Voice (Bỏ qua nếu chọn Inject Only)")
         gradio_layout = QVBoxLayout(self.gradio_group)
@@ -1242,6 +1248,7 @@ class CapCutInjectorGUI(QMainWindow):
             'REF_TEXT': self.ref_text_input.toPlainText(),
             'SPEED_RATIO': self.speed_spin.value(),
             'INJECT_ONLY': is_inject_only,
+            'IGNORE_TIMELINE': self.ignore_timeline_chk.isChecked(),
         }
         
         if not os.path.exists(current_config['SRT_FILE_PATH']):
