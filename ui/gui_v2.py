@@ -21,8 +21,9 @@ from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QProgressBar, QTextEdit,
     QFrame, QGroupBox, QSplitter, QMessageBox, QToolButton,
     QComboBox, QCheckBox, QFileDialog, QTabWidget, QScrollArea,
-    QSizePolicy
+    QSizePolicy, QStackedWidget
 )
+from ui.gui_advanced import AdvancedToolsPanel
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QTimer, QUrl, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QTextCursor, QKeySequence, QShortcut, QDesktopServices
 
@@ -257,16 +258,33 @@ class MainWindowV2(QMainWindow):
         self.lbl_system_badge.setFixedHeight(28)
         self.set_badge_style(self.lbl_system_badge, "#059669", "white")
         
+        self.btn_toggle_mode = QPushButton("🔄 Chế độ: AUTO")
+        self.btn_toggle_mode.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_mode.setStyleSheet("background-color: #3b82f6; color: white; padding: 5px 12px; font-weight: bold; border-radius: 4px;")
+        self.btn_toggle_mode.setFixedHeight(28)
+        self.btn_toggle_mode.clicked.connect(self.toggle_working_mode)
+        
         header_layout.addWidget(self.btn_login_bilibili)
+        header_layout.addWidget(self.btn_toggle_mode)
         header_layout.addWidget(self.lbl_system_badge)
 
         main_layout.addWidget(header_frame)
 
         # ----------------------------------------------------------------------
+        # 1.5 MAIN STACKED WIDGET (AUTO vs ADVANCED)
+        # ----------------------------------------------------------------------
+        self.main_stack = QStackedWidget()
+        main_layout.addWidget(self.main_stack)
+        
+        self.auto_mode_widget = QWidget()
+        auto_layout = QVBoxLayout(self.auto_mode_widget)
+        auto_layout.setContentsMargins(0, 0, 0, 0)
+
+        # ----------------------------------------------------------------------
         # 2. PIPELINE STEPPER TRACKER (6 BƯỚC)
         # ----------------------------------------------------------------------
         self.stepper_widget = PipelineStepperWidget()
-        main_layout.addWidget(self.stepper_widget)
+        auto_layout.addWidget(self.stepper_widget)
 
         # ----------------------------------------------------------------------
         # 3. SPLITTER CHÍNH (TOP INPUT CARDS vs BOTTOM UNIFIED EXECUTION CONSOLE)
@@ -721,7 +739,14 @@ class MainWindowV2(QMainWindow):
         splitter.setStretchFactor(1, 3)
         splitter.setSizes([280, 520])
 
-        main_layout.addWidget(splitter, stretch=1)
+        self.auto_mode_widget.layout().addWidget(splitter, stretch=1)
+        
+        # Thêm auto_mode vào trang 0 của stack
+        self.main_stack.addWidget(self.auto_mode_widget)
+        
+        # Thêm giao diện nâng cao vào trang 1 của stack
+        self.advanced_mode_widget = AdvancedToolsPanel()
+        self.main_stack.addWidget(self.advanced_mode_widget)
 
         self.refresh_profile_list()
         self.update_profile_login_status_ui()
@@ -763,6 +788,59 @@ class MainWindowV2(QMainWindow):
             lbl.setText(value_text)
             if color_hex:
                 lbl.setStyleSheet(f"color: {color_hex}; font-size: 10pt; font-weight: bold;")
+
+    def toggle_working_mode(self):
+        if self.main_stack.currentIndex() == 0:
+            # Switch to Advanced Mode
+            self.main_stack.setCurrentIndex(1)
+            self.btn_toggle_mode.setText("⚙️ Chế độ: NÂNG CAO")
+            self.btn_toggle_mode.setStyleSheet("background-color: #f59e0b; color: black; padding: 5px 12px; font-weight: bold; border-radius: 4px;")
+            
+            # --- ĐỒNG BỘ UI TỪ V2 SANG V1 ---
+            try:
+                legacy = self.advanced_mode_widget.legacy_gui
+                # Đồng bộ Draft
+                legacy.capcut_json_input.setText(self.txt_capcut_draft.text())
+                # Đồng bộ Gradio URL
+                legacy.server_input.setText(self.txt_gradio_url.text())
+                # Đồng bộ Ref Audio
+                legacy.ref_audio_input.setText(self.txt_ref_audio.text())
+                # Đồng bộ Ref Text
+                legacy.ref_text_input.setPlainText(self.txt_ref_text.text())
+                
+                # Đồng bộ TTS Engine Toggle
+                if hasattr(self, 'chk_enable_tts') and self.chk_enable_tts.isChecked():
+                    legacy.inject_mode_combo.setCurrentIndex(0)
+                else:
+                    legacy.inject_mode_combo.setCurrentIndex(1)
+            except Exception as e:
+                print("Lỗi đồng bộ UI:", e)
+                
+        else:
+            # Switch to Auto Mode
+            self.main_stack.setCurrentIndex(0)
+            self.btn_toggle_mode.setText("🔄 Chế độ: AUTO")
+            self.btn_toggle_mode.setStyleSheet("background-color: #3b82f6; color: white; padding: 5px 12px; font-weight: bold; border-radius: 4px;")
+            
+            # --- ĐỒNG BỘ UI TỪ V1 TRỞ LẠI V2 ---
+            try:
+                legacy = self.advanced_mode_widget.legacy_gui
+                # Khôi phục các biến từ V1 về V2
+                self.txt_capcut_draft.setText(legacy.capcut_json_input.text())
+                self.txt_gradio_url.setText(legacy.server_input.text())
+                self.txt_ref_audio.setText(legacy.ref_audio_input.text())
+                self.txt_ref_text.setText(legacy.ref_text_input.toPlainText())
+                
+                if hasattr(self, 'chk_enable_tts'):
+                    if legacy.inject_mode_combo.currentIndex() == 0:
+                        self.chk_enable_tts.setChecked(True)
+                    else:
+                        self.chk_enable_tts.setChecked(False)
+                        
+                # Buộc V2 lưu lại config
+                self.save_user_config()
+            except Exception as e:
+                print("Lỗi đồng bộ UI ngược:", e)
 
     def setup_shortcuts(self):
         QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self.on_run_clicked)
