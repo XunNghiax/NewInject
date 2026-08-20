@@ -18,19 +18,20 @@ from PyQt6.QtGui import QFont, QPalette, QColor
 # 🔗 ĐỒNG BỘ THỰC TẾ: Import class xử lý từ file src/
 
 from src.backend import CapCutBackend
-from src.srt_utils import (
+from src.srt_manager import (
     merge_numbered_srt_files,
     split_srt_file,
     process_and_renumber_srt,
     analyze_audio_wpm_and_log,
     compare_srt_folders,
     process_srt_speed,
-    check_srt_audio_sync
+    check_srt_audio_sync,
+    replace_blocks_in_folder,
+    replace_blocks_in_file,
+    analyze_srt_to_file
 )
-from src.batch_replace_srt import replace_blocks_in_folder, replace_blocks_in_file
-from src.qa_srt_before import analyze_srt_to_file
-from src.gemini_translate import run_auto_translate_srt
-from src.auto_qa_repair import run_auto_qa_repair
+from src.workflow_translate import run_auto_translate_srt
+from src.workflow_qa import run_auto_qa_repair
 
 warnings.filterwarnings("ignore", message="Couldn't find ffmpeg or avconv")
 
