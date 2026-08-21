@@ -8,6 +8,7 @@ import re
 import threading
 import concurrent.futures
 from datetime import timedelta
+import hashlib
 
 try:
     import imageio_ffmpeg
@@ -85,7 +86,7 @@ class CapCutBackend:
         t_start = time.time()
         audio_data = []
         
-        speed_ratio = float(self.cfg.get('SPEED_RATIO', 1.0))
+        speed_ratio = round(float(self.cfg.get('SPEED_RATIO', 1.0)), 4)
 
         if not os.path.exists(self.cfg['SRT_FILE_PATH']):
             raise FileNotFoundError(f"Không tìm thấy file phụ đề tại: {self.cfg['SRT_FILE_PATH']}")
@@ -122,10 +123,14 @@ class CapCutBackend:
                 if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
                     try:
                         dur_ms = len(AudioSegment.from_file(wav_path))
-                        itm['path'] = wav_path
-                        itm['actual_duration_ms'] = dur_ms
-                        audio_data.append(itm)
-                        self.log_fn(f"✨ [Resume] Tìm thấy file đã tạo -> clip_{i:03d}.wav ({dur_ms}ms)")
+                        if dur_ms < 100:
+                            self.log_fn(f"⚠️ [Lỗi] clip_{i:03d}.wav quá ngắn ({dur_ms}ms). Đưa vào danh sách tạo lại.")
+                            missing_items.append(itm)
+                        else:
+                            itm['path'] = wav_path
+                            itm['actual_duration_ms'] = dur_ms
+                            audio_data.append(itm)
+                            self.log_fn(f"✨ [Resume] Tìm thấy file đã tạo -> clip_{i:03d}.wav ({dur_ms}ms)")
                     except Exception:
                         missing_items.append(itm)
                 else:
@@ -190,6 +195,8 @@ class CapCutBackend:
                             
                             if os.path.exists(final_wav_path) and os.path.getsize(final_wav_path) > 0:
                                 dur_ms = len(AudioSegment.from_file(final_wav_path))
+                                if dur_ms < 100:
+                                    raise FileNotFoundError(f"Voice quá ngắn ({dur_ms}ms), file rác.")
                                 self.log_fn(f"✨ [Thành công] Dòng {index:03d} -> {os.path.basename(final_wav_path)} ({dur_ms}ms)")
                                 item['path'] = final_wav_path
                                 item['actual_duration_ms'] = dur_ms
@@ -224,10 +231,17 @@ class CapCutBackend:
             for i, itm in enumerate(items_to_process, 1):
                 wav_path = os.path.join(self.cfg['AUDIO_OUT_DIR'], f"clip_{i:03d}.wav")
                 if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
-                    itm['path'] = wav_path
-                    itm['actual_duration_ms'] = len(AudioSegment.from_file(wav_path))
-                    audio_data.append(itm)
-                    self.log_fn(f"✨ [Quét File] Tìm thấy -> clip_{i:03d}.wav")
+                    try:
+                        dur_ms = len(AudioSegment.from_file(wav_path))
+                        if dur_ms < 100:
+                            self.log_fn(f"⚠️ [Bỏ qua] clip_{i:03d}.wav quá ngắn ({dur_ms}ms) -> Tránh lỗi CapCut 10011.")
+                            continue
+                        itm['path'] = wav_path
+                        itm['actual_duration_ms'] = dur_ms
+                        audio_data.append(itm)
+                        self.log_fn(f"✨ [Quét File] Tìm thấy -> clip_{i:03d}.wav ({dur_ms}ms)")
+                    except Exception:
+                        pass
 
         audio_data.sort(key=lambda x: x['original_start_ms'])
         
@@ -407,9 +421,16 @@ class CapCutBackend:
                 f"end={(start_micro+target_dur_micro)/1_000_000:.3f}s"
             )
 
+            abs_path = os.path.abspath(t_data['path']).replace("\\", "/")
+            try:
+                with open(t_data['path'], 'rb') as _f:
+                    file_md5 = hashlib.md5(_f.read()).hexdigest()
+            except Exception:
+                file_md5 = ""
+
             draft['materials']['audios'].append({
-                "id": audio_id, "unique_id": "", "type": "extract_music", "name": os.path.basename(t_data['path']), "duration": actual_dur_micro, 
-                "path": t_data['path'].replace("\\", "/"), "category_name": "local", "check_flag": 1, "local_material_id": str(uuid.uuid4()).lower()
+                "id": audio_id, "unique_id": file_md5, "type": "extract_music", "name": os.path.basename(t_data['path']), "duration": actual_dur_micro, 
+                "path": abs_path, "category_name": "local", "check_flag": 1, "local_material_id": str(uuid.uuid4()).lower()
             })
             draft['materials']['speeds'].append({"id": speed_id, "type": "speed", "mode": 0, "speed": speed_ratio, "curve_speed": None})
             draft['materials']['placeholder_infos'].append({"id": placeholder_id, "type": "placeholder_info", "meta_type": "none"})
@@ -443,4 +464,26 @@ class CapCutBackend:
             json.dump(draft, f, ensure_ascii=False, indent=4)
         
         self.log_fn("\n🎉 Đã ghi đè thành công dữ liệu vào draft_content.json.")
+
+        # --- XUẤT THÊM FILE WAV TỔNG HỢP NHƯ MỘT BẢN BACKUP ---
+        self.log_fn("\n------------------------")
+        self.log_fn("🎵 Đang tạo file WAV tổng hợp (Combined Audio)...")
+        try:
+            if timeline:
+                max_duration_ms = int(max([(t['final_start'] + t['actual_dur']) / 1000.0 for t in timeline])) + 1000
+                combined = AudioSegment.silent(duration=max_duration_ms)
+                for t in timeline:
+                    clip = AudioSegment.from_file(t['path'])
+                    # Apply speed change to the clip if needed, or overlay actual duration
+                    pos_ms = int(t['final_start'] / 1000.0)
+                    combined = combined.overlay(clip, position=pos_ms)
+                
+                # Use a specific filename for the combined file
+                combined_wav_path = os.path.join(self.cfg['AUDIO_OUT_DIR'], "Combined_Output_Final.wav")
+                combined.export(combined_wav_path, format="wav")
+                self.log_fn(f"🎉 Đã xuất thành công file WAV tổng hợp tại: {combined_wav_path}")
+                self.log_fn("💡 MẸO: Nếu CapCut bị lỗi, bạn có thể kéo trực tiếp file WAV tổng hợp này vào timeline!")
+        except Exception as e:
+            self.log_fn(f"⚠️ Lỗi khi tạo file WAV tổng hợp: {e}")
+
         return str(timedelta(seconds=int(time.time() - t_start)))
