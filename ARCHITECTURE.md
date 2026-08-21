@@ -98,10 +98,14 @@ Hệ thống vận hành theo một dây chuyền (Pipeline) nghiêm ngặt, đ�
   - **Kiểm soát Tạm Dừng/Dừng Đa Luồng:** Trong quá trình sinh TTS bằng `ThreadPoolExecutor` (gọi Gradio đồng thời), `check_pause_callback` được nhúng trực tiếp vào đầu hàm sinh âm thanh `generate_voice_clip`, đảm bảo ngay cả khi đang gọi hàng loạt request, ứng dụng vẫn có thể bị ngắt (Pause/Stop) ngay lập tức theo lệnh người dùng.
 
 ### Bước 6: Chèn nội dung vào CapCut (CapCut Injection)
-- **Module xử lý:** `backend.py`
-- **Cách hoạt động:**
-  - Định vị thư mục dự án CapCut được chỉ định. Đọc file JSON cốt lõi của CapCut là `draft_content.json`.
-  - Backup file JSON trước khi đụng chạm. Quét sạch các track AI cũ nếu người dùng tick chọn "Xóa âm thanh AI cũ".
-  - Tính toán số Microsecond (đơn vị thời gian của CapCut) từ timecode của SRT.
-  - Cập nhật mảng `tracks` (Track phụ đề và Audio track) và mảng `materials` (Khai báo UUID tham chiếu tới các file .wav trong ổ cứng).
-  - Ghi đè file `draft_content.json`. Khi người dùng mở lại phần mềm CapCut PC, video, phụ đề và toàn bộ các khối âm thanh ghép giọng AI đã được căn sẵn khớp 100% với nhau trên Timeline.
+- **Module xử lý:** `backend.py` (Class `CapCutBackend`)
+- **Cách hoạt động & Kiến trúc kỹ thuật chuyên sâu:**
+  - **1. Cơ chế Phục hồi sạch (Clean Restore):** Thay vì xóa track thủ công, hệ thống áp dụng chiến lược phục hồi nguyên bản. Trước khi thao tác, code luôn kiểm tra và copy file `draft_content.json.backup` đè lên `draft_content.json`. Điều này đảm bảo mỗi lần chạy Inject, hệ thống luôn bắt đầu từ một project gốc hoàn toàn sạch sẽ, chặn đứng lỗi tích tụ track rác và media trùng lặp sau nhiều lần chạy thử nghiệm.
+  - **2. Lọc File Rác (Zero-Duration Guard):** Các file âm thanh sinh lỗi từ AI (thường chỉ có cái vỏ WAV header nặng 44 bytes, thời lượng 0ms) là nguyên nhân gây chết bộ giải mã Export của CapCut (báo lỗi 10011). Code được thiết kế để dùng thư viện `pydub` quét đọc trước độ dài thực của từng file âm thanh (`actual_duration_ms`). Mọi file dưới 100ms sẽ bị cảnh báo và cách ly, tuyệt đối không được đưa vào dự án.
+  - **3. Cấu trúc Timeline & Đa Track (Smart Timeline):** Tính toán mốc thời gian từ SRT chuyển đổi sang đơn vị Microsecond (1s = 1,000,000µs). Thuật toán Smart Timeline (N và N-1) giải quyết bài toán chống đè tiếng (overlapping) bằng cách đẩy các đoạn hội thoại sát nhau xuống các Layer âm thanh khác nhau dưới dạng các Track riêng lẻ, giúp giọng không bị đè vỡ.
+  - **4. Bypass Thuật toán xác thực của CapCut (Strict Material Validation):** Để khai báo một file ngoại lai vào cấu trúc JSON của CapCut PC đời mới (không bị báo lỗi Missing Media), hàm tiêm JSON phải cung cấp đồng thời bộ 3 khóa bảo mật sau vào mảng `materials.audios`:
+    - `path`: Bắt buộc phải là đường dẫn tuyệt đối (Absolute Path) và dùng dấu gạch chéo `/` (vd: `D:/coder/...`).
+    - `unique_id`: Bắt buộc phải là mã băm MD5 chuẩn xác của nội dung file `.wav` do hệ thống tự sinh ra qua thư viện `hashlib.md5`. Nếu mã băm này trống hoặc sai, CapCut sẽ từ chối đọc media.
+    - `local_material_id`: Bắt buộc phải là một mã định danh ngẫu nhiên chuẩn UUID (sinh qua `uuid.uuid4()`). Nếu để trống chuỗi `""`, toàn bộ media đó sẽ bị CapCut vứt bỏ và biến mất khỏi timeline.
+  - **5. Kiểm soát độ chính xác (Precision & Linking):** Thông số như tốc độ (`speed_ratio`) được bo tròn chuẩn 4 chữ số thập phân (`round(val, 4)`) để tránh CapCut C++ JSON Parser bị Crash/Ngắt số khi số thập phân quá dài. Khớp nối các mảng `segments` trên Track với UUID của `audio` và các tài nguyên đi kèm như `speeds`.
+  - **Ghi đè file:** Kết thúc luồng, hệ thống chép ngược cấu trúc Data object vào lại file `.json`. Người dùng mở lại dự án trên phần mềm CapCut PC sẽ thấy mọi file wav tự động dải đều đặn và khớp timecode 100% lên dòng thời gian.
