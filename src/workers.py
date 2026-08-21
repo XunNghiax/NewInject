@@ -483,7 +483,7 @@ class ProcessWorker(QThread):
                             "REF_TEXT": self.ref_text,
                             "SPEED_RATIO": 1.25
                         }
-                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg))
+                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
                         backend.ensure_capcut_closed()
                         backend.run_process(only_inject=not self.enable_tts)
                         self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")

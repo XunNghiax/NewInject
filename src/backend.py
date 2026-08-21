@@ -31,10 +31,11 @@ MAX_GAP_MS = 500
 MAX_CHARS_PER_GROUP = 75
 
 class CapCutBackend:
-    def __init__(self, config, log_callback=None, progress_callback=None):
+    def __init__(self, config, log_callback=None, progress_callback=None, check_pause_callback=None):
         self.cfg = config
         self.log_fn = log_callback if log_callback else print
         self.progress_fn = progress_callback if progress_callback else (lambda d, t, p: None)
+        self.check_pause_callback = check_pause_callback
 
     def ensure_capcut_closed(self):
         """Kiểm tra và ép đóng tiến trình CapCut để tránh lỗi Permission Denied"""
@@ -145,6 +146,8 @@ class CapCutBackend:
                     raise RuntimeError(f"Thất bại khi kết nối Gradio: {e}")
 
                 def generate_voice_clip(item):
+                    if self.check_pause_callback:
+                        self.check_pause_callback()
                     index = item['index']
                     text = item['text']
                     MAX_RETRIES = 3
@@ -164,10 +167,24 @@ class CapCutBackend:
                             final_wav_path = os.path.join(self.cfg['AUDIO_OUT_DIR'], f"clip_{index:03d}.wav")
                             
                             audio = AudioSegment.from_file(result[0])
-                            non_silent = detect_nonsilent(audio, min_silence_len=50, silence_thresh=-40)
+                            
+                            # 1. Chuẩn hóa âm lượng (Normalization)
+                            target_dBFS = -20.0
+                            change_in_dBFS = target_dBFS - audio.dBFS
+                            audio = audio.apply_gain(change_in_dBFS)
+                            
+                            # 2. Ngưỡng cắt động (Dynamic Threshold)
+                            dynamic_thresh = audio.dBFS - 16
+                            non_silent = detect_nonsilent(audio, min_silence_len=50, silence_thresh=dynamic_thresh)
+                            
                             if non_silent:
-                                audio = audio[non_silent[0][0]:min(len(audio), non_silent[-1][1] + 125)]
-                                audio = audio.fade_out(50)
+                                # 3. Padding lùi lại 30ms ở đầu
+                                start_idx = max(0, non_silent[0][0] - 30)
+                                end_idx = min(len(audio), non_silent[-1][1] + 125)
+                                audio = audio[start_idx:end_idx]
+                                
+                                # 4. Fade in 20ms và Fade out 50ms
+                                audio = audio.fade_in(20).fade_out(50)
                             
                             audio.export(final_wav_path, format="wav")
                             
@@ -260,14 +277,35 @@ class CapCutBackend:
         
         # --- PASS 1: TÍNH TOÁN TOẠ ĐỘ THỜI GIAN TRÊN RAM ---
         ignore_timeline = self.cfg.get('IGNORE_TIMELINE', False)
+        smart_timeline = self.cfg.get('SMART_TIMELINE', False)
         current_time_micro = 0
+        last_orig_end_micro = 0
+        last_text = ""
 
-        for clip in audio_data:
+        for i, clip in enumerate(audio_data):
             orig_start = clip['original_start_ms'] * 1000
+            orig_end = clip.get('original_end_ms', clip['original_start_ms']) * 1000
             actual_dur = clip['actual_duration_ms'] * 1000
             target_dur = int(actual_dur / speed_ratio)
+            text = clip.get('text', '').strip()
             
-            final_start = current_time_micro if ignore_timeline else orig_start
+            if ignore_timeline:
+                if smart_timeline:
+                    if i == 0:
+                        current_time_micro = orig_start
+                    else:
+                        orig_gap = max(0, orig_start - last_orig_end_micro)
+                        punct_gap = 50_000
+                        if last_text.endswith(('.', '!', '?', '...')):
+                            punct_gap = 800_000
+                        elif last_text.endswith((',', '-', ':')):
+                            punct_gap = 300_000
+                        chosen_gap = max(orig_gap, punct_gap)
+                        current_time_micro += chosen_gap
+                
+                final_start = current_time_micro
+            else:
+                final_start = orig_start
 
             timeline.append({
                 "orig_start": orig_start,
@@ -279,6 +317,8 @@ class CapCutBackend:
             
             if ignore_timeline:
                 current_time_micro += target_dur
+                last_orig_end_micro = orig_end
+                last_text = text
                 
         if not ignore_timeline:
             for i in range(1, total_clips):

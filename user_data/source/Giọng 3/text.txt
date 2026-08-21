@@ -1,0 +1,1 @@
+Trong lĩnh vực công nghệ hiện nay, việc ứng dụng các mô hình ngôn ngữ lớn đang ngày càng trở nên phổ biến. Quá trình tối ưu hóa này đòi hỏi chúng ta phải hiểu rõ cấu trúc dữ liệu và cách hệ thống xử lý thông tin đầu vào.

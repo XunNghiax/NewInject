@@ -338,9 +338,18 @@ class CapCutInjectorGUI(QMainWindow):
         layout.addWidget(self.speed_frame)
         
         self.ignore_timeline_chk = QCheckBox("🚊 Nhúng nối tiếp (Bỏ qua Timeline SRT gốc)")
-        self.ignore_timeline_chk.setStyleSheet("font-weight: bold; color: #fbbf24; margin-top: 5px; margin-bottom: 5px;")
+        self.ignore_timeline_chk.setStyleSheet("font-weight: bold; color: #fbbf24; margin-top: 5px; margin-bottom: 0px;")
         self.ignore_timeline_chk.setChecked(self.user_cfg.get('IGNORE_TIMELINE', False))
         layout.addWidget(self.ignore_timeline_chk)
+
+        self.smart_timeline_chk = QCheckBox("🧠 Nối tiếp Thông minh (Giữ nhịp điệu cảm xúc - Cần bật cờ trên)")
+        self.smart_timeline_chk.setStyleSheet("font-style: italic; color: #38bdf8; margin-left: 20px; margin-bottom: 5px;")
+        self.smart_timeline_chk.setChecked(self.user_cfg.get('SMART_TIMELINE', False))
+        
+        # Liên kết trạng thái: Smart Timeline chỉ có tác dụng/được click khi Ignore Timeline đang bật
+        self.ignore_timeline_chk.toggled.connect(self.smart_timeline_chk.setEnabled)
+        self.smart_timeline_chk.setEnabled(self.ignore_timeline_chk.isChecked())
+        layout.addWidget(self.smart_timeline_chk)
 
 
         self.gradio_group = QGroupBox("Cấu hình AI Voice (Bỏ qua nếu chọn Inject Only)")
@@ -1275,6 +1284,7 @@ class CapCutInjectorGUI(QMainWindow):
             'SPEED_RATIO': self.speed_spin.value(),
             'INJECT_ONLY': is_inject_only,
             'IGNORE_TIMELINE': self.ignore_timeline_chk.isChecked(),
+            'SMART_TIMELINE': self.smart_timeline_chk.isChecked(),
         }
         
         if not os.path.exists(current_config['SRT_FILE_PATH']):
