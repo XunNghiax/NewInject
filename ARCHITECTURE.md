@@ -6,8 +6,8 @@ Dự án là một hệ thống tự động hóa toàn diện (automation pipel
 2. **Tạo phụ đề (Subtitle Generation)**: Trích xuất và chia nhỏ file phụ đề gốc (SRT) sử dụng Whisper.
 3. **Dịch thuật AI (Translation)**: Tự động hóa qua trình duyệt ẩn Playwright để điều khiển Google Gemini dịch thuật phụ đề với logic tách/gộp (Split/Merge) để vượt qua giới hạn độ dài văn bản.
 4. **Auto QA & Repair**: Phân tích lỗi timecode, độ dài câu trong phụ đề dịch, trích xuất đoạn lỗi (chunks) và gọi Gemini để vá lỗi tự động trên bản gốc mà không phá hỏng mốc thời gian.
-5. **Text-to-Speech (TTS)**: Sinh âm thanh qua API Gradio. Tích hợp cơ chế Just-in-time pause để đợi người dùng nạp lại URL khi server Gradio bị chết dọc đường.
-6. **CapCut Injection**: Bơm (inject) trực tiếp hàng loạt file phụ đề và audio vào thẳng file draft JSON của ứng dụng CapCut PC, giúp tự động khớp timeline mà không cần chỉnh sửa tay.
+5. **Text-to-Speech (TTS)**: Sinh âm thanh qua API Gradio. Tích hợp cơ chế Just-in-time pause để đợi người dùng nạp lại URL khi server Gradio bị chết dọc đường. Đồng thời hỗ trợ Tạm Dừng/Dừng an toàn ngay giữa tiến trình chạy đa luồng.
+6. **CapCut Injection**: Bơm (inject) trực tiếp hàng loạt file phụ đề và audio vào thẳng file draft JSON của ứng dụng CapCut PC, giúp tự động khớp timeline mà không cần chỉnh sửa tay. Hệ thống đã được nâng cấp để hỗ trợ luồng Pause/Stop hoàn chỉnh trong cả quá trình sinh Audio và Inject.
 
 ## 2. Cấu trúc thư mục mới (Refactored Directory Structure - MVC & OOP)
 Kiến trúc dự án đã được Tái cấu trúc triệt để (Refactored) phân tách rõ ràng theo mô hình MVC (Model-View-Controller) và Hướng đối tượng (OOP):
@@ -35,6 +35,7 @@ Kiến trúc dự án đã được Tái cấu trúc triệt để (Refactored) 
 - **Framework**: **PyQt6**.
 - **Tách biệt UI và Backend**: Mọi công việc nặng (tải file, dịch AI, xử lý JSON) BẮT BUỘC phải được ném vào các Worker Threads trong `src/workers.py`. UI (`gui_v2.py`) tuyệt đối không xử lý vòng lặp nặng.
 - **Giao tiếp (Communication)**: Các luồng nền giao tiếp với UI thông qua cơ chế **Signals/Slots** (`pyqtSignal`).
+- **Cơ chế Pause/Stop an toàn (Interrupts)**: Toàn bộ quá trình chạy được kiểm soát bởi `QWaitCondition` và `QMutex`. Cờ `check_pause_callback` được truyền xuyên suốt qua tất cả các module (từ Bilibili Downloader, Whisper, Playwright tới ThreadPool của Gradio TTS). Khi người dùng nhấn Pause/Stop, luồng nền sẽ phản hồi và dừng ngay lập tức mà không gây crash hoặc deadlock.
 - **Auto Profile Rotation**: Hệ thống có khả năng theo dõi ngạch tài khoản Google (Quota). Nếu phát hiện account bị ép dùng bản Flash-Lite, hệ thống tự đánh dấu Cooldown (Khóa 5h) và tự động nhảy qua Account Pro khác để làm tiếp.
 
 ### 3.2. Coding Conventions
@@ -94,6 +95,7 @@ Hệ thống vận hành theo một dây chuyền (Pipeline) nghiêm ngặt, đ�
   - Duyệt qua từng Block trong file SRT tiếng Việt cuối cùng.
   - Gửi Text tới server Gradio TTS qua REST API. Lấy kết quả lưu thành các file `001.wav`, `002.wav` trong thư mục `5_AUDIO_VI`.
   - **Xử lý ngắt kết nối Just-in-time:** Link Gradio Colab thường hay chết đột ngột. Khi Request HTTP bị timeout hoặc trả mã lỗi, hệ thống không làm hỏng tiến trình mà đưa luồng Thread vào trạng thái Pause (Bằng `QWaitCondition`). Giao diện sẽ thông báo người dùng nạp lại URL mới. Sau khi nạp, luồng Thread tiếp tục Resume dịch từ chính Block đang bị dở dang.
+  - **Kiểm soát Tạm Dừng/Dừng Đa Luồng:** Trong quá trình sinh TTS bằng `ThreadPoolExecutor` (gọi Gradio đồng thời), `check_pause_callback` được nhúng trực tiếp vào đầu hàm sinh âm thanh `generate_voice_clip`, đảm bảo ngay cả khi đang gọi hàng loạt request, ứng dụng vẫn có thể bị ngắt (Pause/Stop) ngay lập tức theo lệnh người dùng.
 
 ### Bước 6: Chèn nội dung vào CapCut (CapCut Injection)
 - **Module xử lý:** `backend.py`
