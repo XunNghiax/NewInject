@@ -163,6 +163,8 @@ class MainWindowV2(QMainWindow):
         self.is_paused = False
         self.start_timestamp = None
         self.logs_history = []
+        self.job_queue = []
+        self.current_job_index = 0
         self.is_voice_expanded = False
         
         self.timer = QTimer(self)
@@ -321,9 +323,10 @@ class MainWindowV2(QMainWindow):
         lbl_link.setObjectName("InputLabel")
         link_box = QHBoxLayout()
         link_box.setSpacing(6)
-        self.txt_link = QLineEdit()
+        self.txt_link = QTextEdit()
+        self.txt_link.setFixedHeight(65)
         self.txt_link.setObjectName("MasterInput")
-        self.txt_link.setPlaceholderText("Dán link Bilibili (https://...) hoặc chọn file Media/SRT...")
+        self.txt_link.setPlaceholderText("Dán danh sách Link Bilibili (mỗi link 1 dòng)...")
 
         self.btn_paste_link = QToolButton()
         self.btn_paste_link.setText("📋 Dán")
@@ -408,9 +411,9 @@ class MainWindowV2(QMainWindow):
         lbl_dir.setObjectName("InputLabel")
         dir_box = QHBoxLayout()
         dir_box.setSpacing(6)
-        self.txt_output_dir = QLineEdit("./downloads")
+        self.txt_output_dir = QTextEdit("./downloads")
+        self.txt_output_dir.setFixedHeight(65)
         self.txt_output_dir.setObjectName("MasterInput")
-        self.txt_output_dir.editingFinished.connect(self.save_user_config)
 
         self.btn_browse_dir = QToolButton()
         self.btn_browse_dir.setText("📂 Chọn")
@@ -438,14 +441,14 @@ class MainWindowV2(QMainWindow):
         lbl_draft.setObjectName("InputLabel")
         draft_box = QHBoxLayout()
         draft_box.setSpacing(6)
-        self.txt_capcut_draft = QLineEdit()
+        self.txt_capcut_draft = QTextEdit()
+        self.txt_capcut_draft.setFixedHeight(65)
         self.txt_capcut_draft.setObjectName("MasterInput")
         from src.utils import get_default_capcut_path
         default_cp_path = get_default_capcut_path()
         if default_cp_path:
             self.txt_capcut_draft.setText(default_cp_path)
-        self.txt_capcut_draft.setPlaceholderText("Thư mục com.lveditor.draft...")
-        self.txt_capcut_draft.editingFinished.connect(self.save_user_config)
+        self.txt_capcut_draft.setPlaceholderText("Dán danh sách CapCut Draft (mỗi cái 1 dòng)...")
         self.txt_capcut_draft.textChanged.connect(self.sync_capcut_draft_to_worker)
 
         self.btn_browse_draft = QToolButton()
@@ -759,6 +762,35 @@ class MainWindowV2(QMainWindow):
         self.update_profile_login_status_ui()
         self.append_log("✨ Chào mừng bạn tới CapCutInjector Pro Studio v3! Đã chuẩn bị sẵn sàng.", "info")
         self.update_cookie_badge_status()
+        self.load_queue_data()
+        
+    def load_queue_data(self):
+        import json
+        queue_file = os.path.join("user_data", "queue.json")
+        if os.path.exists(queue_file):
+            try:
+                with open(queue_file, "r", encoding="utf-8") as f:
+                    self.job_queue = json.load(f)
+                
+                pending_links = []
+                pending_dirs = []
+                pending_drafts = []
+                for job in self.job_queue:
+                    if job.get("status") == "pending":
+                        pending_links.append(job.get("link", ""))
+                        pending_dirs.append(job.get("out_dir", ""))
+                        pending_drafts.append(job.get("draft", ""))
+                
+                if pending_links:
+                    self.txt_link.setText('\n'.join(pending_links))
+                if pending_dirs:
+                    self.txt_output_dir.setText('\n'.join(pending_dirs))
+                if pending_drafts:
+                    self.txt_capcut_draft.setText('\n'.join(pending_drafts))
+            except json.JSONDecodeError as e:
+                self.append_log(f"⚠️ File queue.json bị hỏng. Không thể khôi phục hàng đợi: {e}", "warning")
+            except Exception as e:
+                self.append_log(f"❌ Lỗi không xác định khi tải hàng đợi: {e}", "error")
 
     # ==========================================================================
     # HELPER UI & EVENT HANDLERS
@@ -807,7 +839,7 @@ class MainWindowV2(QMainWindow):
             try:
                 legacy = self.advanced_mode_widget.legacy_gui
                 # Đồng bộ Draft
-                legacy.capcut_json_input.setText(self.txt_capcut_draft.text())
+                legacy.capcut_json_input.setText(self.txt_capcut_draft.toPlainText())
                 # Đồng bộ Gradio URL
                 legacy.server_input.setText(self.txt_gradio_url.text())
                 # Đồng bộ Ref Audio
@@ -872,7 +904,7 @@ class MainWindowV2(QMainWindow):
                 self.btn_login_bilibili.setStyleSheet("background-color: #334155; color: #cbd5e1; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid #475569; min-height: 28px; max-height: 28px; height: 28px;")
 
     def on_clean_ai_draft(self):
-        draft_path = self.txt_capcut_draft.text().strip()
+        draft_path = self.txt_capcut_draft.toPlainText().strip()
         if not draft_path:
             QMessageBox.warning(self, "Lỗi", "Vui lòng chọn thư mục CapCut Draft hợp lệ trước khi Gỡ AI!")
             return
@@ -952,9 +984,9 @@ class MainWindowV2(QMainWindow):
     def save_user_config(self):
         from src.config_manager import ConfigManager
         cfg = {
-            "last_url": self.txt_link.text().strip(),
-            "last_dir": self.txt_output_dir.text().strip() or "./downloads",
-            "last_draft": self.txt_capcut_draft.text().strip(),
+            "last_url": self.txt_link.toPlainText().strip(),
+            "last_dir": self.txt_output_dir.toPlainText().strip() or "./downloads",
+            "last_draft": self.txt_capcut_draft.toPlainText().strip(),
             "last_profile": self.get_selected_profile(),
             "last_gradio_url": self.txt_gradio_url.text().strip(),
             "last_ref_audio": self.txt_ref_audio.text().strip(),
@@ -1021,18 +1053,18 @@ class MainWindowV2(QMainWindow):
         self.login_worker.start()
 
     def browse_ref_audio(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Chọn file Voice Mẫu", self.txt_output_dir.text().strip(), "Tệp Âm thanh (*.wav *.mp3 *.flac);;Tất cả (*.*)")
+        f, _ = QFileDialog.getOpenFileName(self, "Chọn file Voice Mẫu", self.txt_output_dir.toPlainText().strip(), "Tệp Âm thanh (*.wav *.mp3 *.flac);;Tất cả (*.*)")
         if f:
             self.txt_ref_audio.setText(f)
             self.save_user_config()
 
     def browse_smart_input_file(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Chọn tệp Đầu vào", self.txt_output_dir.text().strip(), "Tệp Đầu Vào (*.mp4 *.mkv *.avi *.mp3 *.wav *.srt);;Tất cả (*.*)")
+        f, _ = QFileDialog.getOpenFileName(self, "Chọn tệp Đầu vào", self.txt_output_dir.toPlainText().strip(), "Tệp Đầu Vào (*.mp4 *.mkv *.avi *.mp3 *.wav *.srt);;Tất cả (*.*)")
         if f:
             self.txt_link.setText(f)
 
     def browse_capcut_draft(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Chọn file draft_content.json", self.txt_capcut_draft.text().strip(), "JSON Files (*.json);;All Files (*.*)")
+        f, _ = QFileDialog.getOpenFileName(self, "Chọn file draft_content.json", self.txt_capcut_draft.toPlainText().strip(), "JSON Files (*.json);;All Files (*.*)")
         if f:
             self.txt_capcut_draft.setText(f)
             self.save_user_config()
@@ -1044,7 +1076,7 @@ class MainWindowV2(QMainWindow):
             self.save_user_config()
 
     def open_output_directory(self):
-        dir_path = os.path.abspath(self.txt_output_dir.text().strip() or "./downloads")
+        dir_path = os.path.abspath(self.txt_output_dir.toPlainText().strip() or "./downloads")
         os.makedirs(dir_path, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(dir_path))
 
@@ -1088,22 +1120,26 @@ class MainWindowV2(QMainWindow):
         self.txt_ref_audio.setStyleSheet("")
         self.txt_ref_text.setStyleSheet("")
 
-        link = self.txt_link.text().strip()
-        out_dir = self.txt_output_dir.text().strip()
-        draft = self.txt_capcut_draft.text().strip()
+        link_raw = self.txt_link.toPlainText().strip()
+        out_dir_raw = self.txt_output_dir.toPlainText().strip()
+        draft_raw = self.txt_capcut_draft.toPlainText().strip()
         gradio = self.txt_gradio_url.text().strip()
         ref_aud = self.txt_ref_audio.text().strip()
         ref_txt = self.txt_ref_text.text().strip()
         enable_tts = self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True
 
+        links = [x.strip() for x in link_raw.split('\n') if x.strip()]
+        out_dirs = [x.strip() for x in out_dir_raw.split('\n') if x.strip()]
+        drafts = [x.strip() for x in draft_raw.split('\n') if x.strip()]
+
         missing_fields = []
-        if not link:
+        if not links:
             self.txt_link.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
             missing_fields.append("Nguồn đầu vào (Link / File)")
-        if not out_dir:
+        if not out_dirs:
             self.txt_output_dir.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
             missing_fields.append("Thư mục dự án")
-        if self.chk_auto_inject_capcut.isChecked() and not draft:
+        if self.chk_auto_inject_capcut.isChecked() and not drafts:
             self.txt_capcut_draft.setStyleSheet("border: 2px solid #ef4444; background-color: #451a03;")
             missing_fields.append("Đường dẫn CapCut Draft")
 
@@ -1122,7 +1158,65 @@ class MainWindowV2(QMainWindow):
             QMessageBox.warning(self, "Thiếu Thông Tin Bắt Buộc ⚠️", msg)
             return
 
+        if len(links) != len(out_dirs) or (self.chk_auto_inject_capcut.isChecked() and len(links) != len(drafts)):
+            QMessageBox.warning(self, "Lỗi Số Lượng Dòng ⚠️", "Số lượng dòng của Link, Thư mục Output và Capcut Draft không khớp nhau! Vui lòng kiểm tra lại.")
+            return
+
         self.save_user_config()
+
+        import json
+        queue_data = []
+        for i in range(len(links)):
+            queue_data.append({
+                "link": links[i],
+                "out_dir": out_dirs[i],
+                "draft": drafts[i] if i < len(drafts) else "",
+                "status": "pending"
+            })
+        
+        queue_file = os.path.join("user_data", "queue.json")
+        os.makedirs(os.path.dirname(queue_file), exist_ok=True)
+        with open(queue_file, "w", encoding="utf-8") as f:
+            json.dump(queue_data, f, indent=4, ensure_ascii=False)
+            
+        self.job_queue = queue_data
+        self.current_job_index = 0
+        
+        self.btn_run.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self.btn_stop.setEnabled(True)
+        
+        self.start_next_job()
+
+    def start_next_job(self):
+        while self.current_job_index < len(self.job_queue):
+            if self.job_queue[self.current_job_index]["status"] == "pending":
+                break
+            self.current_job_index += 1
+            
+        if self.current_job_index >= len(self.job_queue):
+            QMessageBox.information(self, "Hoàn Tất Hàng Loạt 🎉", "Toàn bộ danh sách dự án đã hoàn tất!")
+            self.btn_run.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            self.lbl_system_badge.setText("🟢 SẴN SÀNG")
+            self.set_badge_style(self.lbl_system_badge, "#059669", "white")
+            self.update_kpi_value("kpi_status", "Đang chờ", "#94a3b8")
+            return
+            
+        job = self.job_queue[self.current_job_index]
+        link = job["link"]
+        out_dir = job["out_dir"]
+        draft = job["draft"]
+        
+        gradio = self.txt_gradio_url.text().strip()
+        ref_aud = self.txt_ref_audio.text().strip()
+        ref_txt = self.txt_ref_text.text().strip()
+        enable_tts = self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True
+        
+        self.append_log("="*50, "info")
+        self.append_log(f"🚀 BẮT ĐẦU CHẠY DỰ ÁN ({self.current_job_index + 1}/{len(self.job_queue)})", "success")
+        self.append_log("="*50, "info")
 
         local_media = None
         srt_translate = None
@@ -1141,17 +1235,7 @@ class MainWindowV2(QMainWindow):
         fast_forward = False
         final_srt_path_check = os.path.join(out_dir, "output.srt")
         if os.path.exists(final_srt_path_check):
-            reply = QMessageBox.question(
-                self, "Phát hiện File Output", 
-                "Phát hiện file 'output.srt' đã tồn tại sẵn trong thư mục dự án.\n\nBạn có muốn BỎ QUA toàn bộ các bước Tải/Dịch/QA và dùng luôn file này để nhảy thẳng sang bước sinh Voice & Nhúng CapCut không?", 
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                fast_forward = True
-
-        self.btn_run.setEnabled(False)
-        self.btn_pause.setEnabled(True)
-        self.btn_stop.setEnabled(True)
+            fast_forward = True
 
         self.global_progress_bar.setValue(0)
         self.local_progress_bar.setValue(0)
@@ -1159,7 +1243,7 @@ class MainWindowV2(QMainWindow):
             self.lbl_global_pct.setText("0%")
             self.lbl_local_pct.setText("0%")
         self.update_kpi_value("kpi_percent", "0%", "#10b981")
-        self.update_kpi_value("kpi_status", "Đang xử lý ⚡", "#6366f1")
+        self.update_kpi_value("kpi_status", f"Dự án {self.current_job_index+1} ⚡", "#6366f1")
         self.update_kpi_value("kpi_elapsed", "00:00:00", "#38bdf8")
 
         self.lbl_system_badge.setText("⚡ CHẠY TỰ ĐỘNG")
@@ -1217,7 +1301,7 @@ class MainWindowV2(QMainWindow):
 
     def sync_capcut_draft_to_worker(self):
         if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
-            self.worker.capcut_draft_path = self.txt_capcut_draft.text().strip()
+            self.worker.capcut_draft_path = self.txt_capcut_draft.toPlainText().strip()
 
     def sync_auto_inject_to_worker(self):
         if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
@@ -1254,21 +1338,43 @@ class MainWindowV2(QMainWindow):
 
     def on_process_finished(self, success: bool, message: str):
         self.timer.stop()
-        self.btn_run.setEnabled(True)
-        self.btn_pause.setEnabled(False)
-        self.btn_stop.setEnabled(False)
         self.is_paused = False
 
         if success:
-            self.update_kpi_value("kpi_status", "HOÀN THÀNH 🎉", "#10b981")
+            self.update_kpi_value("kpi_status", f"XONG DỰ ÁN {self.current_job_index+1} 🎉", "#10b981")
             self.update_kpi_value("kpi_percent", "100%", "#10b981")
             self.lbl_system_badge.setText("✅ HOÀN THÀNH")
             self.set_badge_style(self.lbl_system_badge, "#059669", "white")
             self.append_log(f"SUCCESS: {message}", "success")
+            
+            if hasattr(self, 'job_queue') and self.current_job_index < len(self.job_queue):
+                self.job_queue[self.current_job_index]["status"] = "completed"
+                import json
+                queue_file = os.path.join("user_data", "queue.json")
+                with open(queue_file, "w", encoding="utf-8") as f:
+                    json.dump(self.job_queue, f, indent=4, ensure_ascii=False)
+                    
+                links = self.txt_link.toPlainText().strip().split('\n')
+                if links: self.txt_link.setText('\n'.join(links[1:]).strip())
+                
+                out_dirs = self.txt_output_dir.toPlainText().strip().split('\n')
+                if out_dirs: self.txt_output_dir.setText('\n'.join(out_dirs[1:]).strip())
+                
+                drafts = self.txt_capcut_draft.toPlainText().strip().split('\n')
+                if drafts: self.txt_capcut_draft.setText('\n'.join(drafts[1:]).strip())
+                
+                self.current_job_index += 1
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(1500, self.start_next_job)
+                return
         else:
+            self.btn_run.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
             self.update_kpi_value("kpi_status", "THẤT BẠI ❌", "#ef4444")
             self.lbl_system_badge.setText("❌ LỖI")
             self.set_badge_style(self.lbl_system_badge, "#dc2626", "white")
+            QMessageBox.warning(self, "Tiến Trình Thất Bại ⚠️", f"Đã xảy ra lỗi ở dự án {self.current_job_index+1}:\n{message}")
 
     def update_local_progress(self, pct: int, status: str):
         if pct >= 0:

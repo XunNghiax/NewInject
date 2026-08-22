@@ -206,8 +206,8 @@ class ProcessWorker(QThread):
             if not self.fast_forward_mode and os.path.exists(final_srt_path):
                 try:
                     os.remove(final_srt_path)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.emit_log(f"⚠️ Cảnh báo: Không thể xóa file output.srt cũ. Vui lòng đóng các app đang mở file này để tránh lỗi hiển thị! ({e})", "warning")
 
             # ── BƯỚC 1: DOWNLOAD / NẠP NGUỒN MEDIA ──
             self.step_signal.emit(1)

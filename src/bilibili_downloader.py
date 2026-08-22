@@ -293,6 +293,7 @@ class BilibiliDownloader:
                     self.check_pause_callback()
                 if self._is_cancelled:
                     proc.kill()
+                    proc.wait()
                     return {"success": False, "error": "Đã bị hủy bởi người dùng"}
                 
                 line_str = line.strip()

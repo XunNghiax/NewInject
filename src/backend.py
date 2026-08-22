@@ -50,8 +50,11 @@ class CapCutBackend:
                     self.log_fn(f"⚠️ Phát hiện CapCut đang mở (PID: {proc.info['pid']}). Đang tiến hành đóng lại...")
                     proc.kill()
                     closed_any = True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 pass
+            except psutil.AccessDenied:
+                self.log_fn("❌ LỖI QUYỀN: Không thể tự động đóng CapCut. Vui lòng tắt thủ công hoặc chạy Tool bằng Run as Administrator!")
+                raise PermissionError("Access Denied khi cố gắng đóng CapCut.")
         
         if closed_any:
             self.log_fn("✅ Đã đóng ứng dụng CapCut.")
@@ -263,7 +266,10 @@ class CapCutBackend:
         for file_name in os.listdir(capcut_dir):
             if file_name.endswith('.backup') and not file_name == os.path.basename(main_backup_path):
                 backup_full_path = os.path.join(capcut_dir, file_name)
-                original_full_path = backup_full_path.replace(".backup", "")
+                if backup_full_path.endswith(".backup"):
+                    original_full_path = backup_full_path[:-7]
+                else:
+                    original_full_path = backup_full_path.replace(".backup", "")
                 try:
                     if os.path.exists(original_full_path): os.remove(original_full_path)
                     shutil.move(backup_full_path, original_full_path)
