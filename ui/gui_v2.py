@@ -1186,9 +1186,26 @@ class MainWindowV2(QMainWindow):
         self.btn_pause.setEnabled(True)
         self.btn_stop.setEnabled(True)
         
+        self.is_batch_cancelled = False
+        self.txt_link.setReadOnly(True)
+        self.txt_output_dir.setReadOnly(True)
+        self.txt_capcut_draft.setReadOnly(True)
+        
         self.start_next_job()
 
     def start_next_job(self):
+        if getattr(self, 'is_batch_cancelled', False):
+            self.lbl_system_badge.setText("🛑 ĐÃ HỦY")
+            self.set_badge_style(self.lbl_system_badge, "#dc2626", "white")
+            self.update_kpi_value("kpi_status", "Đã dừng", "#94a3b8")
+            self.txt_link.setReadOnly(False)
+            self.txt_output_dir.setReadOnly(False)
+            self.txt_capcut_draft.setReadOnly(False)
+            self.btn_run.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_stop.setEnabled(False)
+            return
+
         while self.current_job_index < len(self.job_queue):
             if self.job_queue[self.current_job_index]["status"] == "pending":
                 break
@@ -1199,6 +1216,9 @@ class MainWindowV2(QMainWindow):
             self.btn_run.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_stop.setEnabled(False)
+            self.txt_link.setReadOnly(False)
+            self.txt_output_dir.setReadOnly(False)
+            self.txt_capcut_draft.setReadOnly(False)
             self.lbl_system_badge.setText("🟢 SẴN SÀNG")
             self.set_badge_style(self.lbl_system_badge, "#059669", "white")
             self.update_kpi_value("kpi_status", "Đang chờ", "#94a3b8")
@@ -1331,10 +1351,21 @@ class MainWindowV2(QMainWindow):
             self.set_badge_style(self.lbl_system_badge, "#0284c7", "white")
 
     def on_stop_clicked(self):
-        if self.worker and self.worker.isRunning():
-            reply = QMessageBox.question(self, "Xác Nhận Dừng", "🛑 Bạn có chắc chắn muốn DỪNG tiến trình?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
+        reply = QMessageBox.question(self, "Xác Nhận Dừng", "🛑 Bạn có chắc chắn muốn DỪNG tiến trình?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.is_batch_cancelled = True
+            if self.worker and self.worker.isRunning():
                 self.worker.stop()
+            else:
+                self.txt_link.setReadOnly(False)
+                self.txt_output_dir.setReadOnly(False)
+                self.txt_capcut_draft.setReadOnly(False)
+                self.btn_run.setEnabled(True)
+                self.btn_pause.setEnabled(False)
+                self.btn_stop.setEnabled(False)
+                self.lbl_system_badge.setText("🛑 ĐÃ DỪNG")
+                self.set_badge_style(self.lbl_system_badge, "#dc2626", "white")
+                self.update_kpi_value("kpi_status", "Đã dừng", "#94a3b8")
 
     def on_process_finished(self, success: bool, message: str):
         self.timer.stop()
@@ -1354,13 +1385,13 @@ class MainWindowV2(QMainWindow):
                 with open(queue_file, "w", encoding="utf-8") as f:
                     json.dump(self.job_queue, f, indent=4, ensure_ascii=False)
                     
-                links = self.txt_link.toPlainText().strip().split('\n')
+                links = [x.strip() for x in self.txt_link.toPlainText().split('\n') if x.strip()]
                 if links: self.txt_link.setText('\n'.join(links[1:]).strip())
                 
-                out_dirs = self.txt_output_dir.toPlainText().strip().split('\n')
+                out_dirs = [x.strip() for x in self.txt_output_dir.toPlainText().split('\n') if x.strip()]
                 if out_dirs: self.txt_output_dir.setText('\n'.join(out_dirs[1:]).strip())
                 
-                drafts = self.txt_capcut_draft.toPlainText().strip().split('\n')
+                drafts = [x.strip() for x in self.txt_capcut_draft.toPlainText().split('\n') if x.strip()]
                 if drafts: self.txt_capcut_draft.setText('\n'.join(drafts[1:]).strip())
                 
                 self.current_job_index += 1
@@ -1368,6 +1399,9 @@ class MainWindowV2(QMainWindow):
                 QTimer.singleShot(1500, self.start_next_job)
                 return
         else:
+            self.txt_link.setReadOnly(False)
+            self.txt_output_dir.setReadOnly(False)
+            self.txt_capcut_draft.setReadOnly(False)
             self.btn_run.setEnabled(True)
             self.btn_pause.setEnabled(False)
             self.btn_stop.setEnabled(False)
