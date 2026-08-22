@@ -290,7 +290,12 @@ class BilibiliDownloader:
             
             for line in proc.stdout:
                 if self.check_pause_callback:
-                    self.check_pause_callback()
+                    try:
+                        self.check_pause_callback()
+                    except Exception as e:
+                        proc.kill()
+                        proc.wait()
+                        raise e
                 if self._is_cancelled:
                     proc.kill()
                     proc.wait()

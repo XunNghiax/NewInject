@@ -168,10 +168,17 @@ class CapCutBackend:
                             self.log_fn(f"🔄 [Thử lại {attempt}/{MAX_RETRIES}] Dòng {index:03d} gặp sự cố...")
                         
                         try:
+                            if self.check_pause_callback:
+                                self.check_pause_callback()
+                                
                             result = client.predict(
                                 text=text, lang="Vietnamese", ref_aud=uploaded_ref, ref_text=self.cfg['REF_TEXT'], 
                                 instruct="", ns=32, gs=2.0, dn=True, sp=1.0, du=0, pp=True, po=True, api_name="/_clone_fn"
                             )
+                            
+                            if self.check_pause_callback:
+                                self.check_pause_callback()
+                                
                             final_wav_path = os.path.join(self.cfg['AUDIO_OUT_DIR'], f"clip_{index:03d}.wav")
                             
                             audio = AudioSegment.from_file(result[0])
@@ -207,6 +214,8 @@ class CapCutBackend:
                             else:
                                 raise FileNotFoundError("Voice sinh ra bị trống.")
                         except Exception as e:
+                            if "hủy bỏ" in str(e).lower():
+                                raise e
                             attempt += 1
                             if attempt <= MAX_RETRIES:
                                 time.sleep(1.5)
