@@ -123,6 +123,23 @@ def run_auto_translate_srt(
         log_callback("⚠️ Không tìm thấy tệp .srt nào trong thư mục nguồn!")
         return
 
+    # --- PRE-CHECK: Lọc các file đã dịch hoàn chỉnh ---
+    pending_files = []
+    for file_name in srt_files:
+        cn_file_path = os.path.join(cn_folder, file_name)
+        if not find_existing_translated_file(cn_file_path, vi_folder):
+            pending_files.append(file_name)
+    
+    if not pending_files:
+        log_callback("⏩ TẤT CẢ các tệp đã được dịch và đồng bộ Timecode hoàn tất từ trước. BỎ QUA bước mở trình duyệt AI!", "success")
+        return
+    
+    if len(pending_files) < len(srt_files):
+        log_callback(f"⚠️ Đã lọc bỏ các file hoàn thành. Chỉ tiến hành mở trình duyệt và dịch bù {len(pending_files)} tệp còn thiếu...", "info")
+    
+    srt_files = pending_files
+    # ---------------------------------------------------
+
     available_profiles = get_available_profiles()
     if profile_folder and profile_folder in available_profiles:
         current_profile_idx = available_profiles.index(profile_folder)
@@ -137,16 +154,25 @@ def run_auto_translate_srt(
 
     from src.gemini_bot import GeminiBot
 
-    with sync_playwright() as p:
-        bot = GeminiBot(log_callback=log_callback)
+    # --- BLOCKER: Chờ 60 phút ở vòng ngoài nếu TẤT CẢ profile đều bị khóa ---
+    while True:
         in_cd, rem_str, _ = is_profile_in_cooldown(current_profile)
         if in_cd:
-            log_callback(f"⏩ [CẢNH BÁO] Profile ban đầu [{current_profile}] đang trong thời gian chờ 5 tiếng (Còn {rem_str}). Tự động nhảy sang Profile tiếp theo!", "warning")
             next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
             if next_p:
+                log_callback(f"⏩ [CẢNH BÁO] Profile [{current_profile}] đang chờ (Còn {rem_str}). Đã chuyển sang: [{next_p}]", "warning")
                 current_profile = next_p
                 current_profile_idx = available_profiles.index(next_p)
+                break
+            else:
+                log_callback("🛑 CẢNH BÁO: TOÀN BỘ Profile đều bị phạt 5 tiếng! Ngủ đông 60 phút chờ hồi phục (không tốn RAM)...")
+                countdown_sleep(3600, log_callback, "⏳ Đang ngủ đông:")
+        else:
+            break
+    # -----------------------------------------------------------------------
 
+    with sync_playwright() as p:
+        bot = GeminiBot(log_callback=log_callback)
         browser, page, model_status = bot.launch(p, current_profile, prompt_file, check_pause_callback)
         if model_status == "FLASH_LITE":
             record_profile_cooldown(current_profile, 5.0, log_callback)

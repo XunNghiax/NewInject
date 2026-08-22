@@ -175,8 +175,15 @@ class MainWindowV2(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("CapcutInjector Pro Studio v3 - Hệ Thống Tự Động Hóa 1-Click 🚀")
-        self.resize(1260, 840)
+        self.resize(1280, 720)
         self.setMinimumSize(1000, 660)
+
+        # --- Căn giữa màn hình ---
+        qr = self.frameGeometry()
+        cp = self.screen().availableGeometry().center()
+        qr.moveCenter(cp)
+        self.move(qr.topLeft())
+        # -------------------------
 
         self.setup_stylesheet()
 

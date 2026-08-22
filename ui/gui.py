@@ -179,8 +179,16 @@ class CapCutInjectorGUI(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle("CapCut Audio Injector & SRT Tools Pro 🚀")
-        self.resize(1150, 780) 
+        self.resize(1280, 720) 
         self.setMinimumSize(1000, 700)
+
+        # --- Căn giữa màn hình ---
+        qr = self.frameGeometry()
+        cp = self.screen().availableGeometry().center()
+        qr.moveCenter(cp)
+        self.move(qr.topLeft())
+        # -------------------------
+
         self.setup_global_styles()
 
         central_widget = QWidget()

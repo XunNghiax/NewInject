@@ -813,14 +813,27 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
         
         timestamp_str  = datetime.now().strftime("%Y-%m-%d %H:%M")
 
+        # --- AUTO-INCREMENT LOGIC ---
+        start_id = 0
+        if os.path.exists(out_dir):
+            import re
+            for existing_f in os.listdir(out_dir):
+                if existing_f.lower().startswith(f"{folder_name.lower()}_") and existing_f.lower().endswith('.txt'):
+                    # Tìm số ID ở cuối file, bỏ qua hậu tố _done hoặc _da_sua
+                    match = re.search(r'_(\d+)(?:_done|_da_sua)?\.txt$', existing_f, re.IGNORECASE)
+                    if match:
+                        num = int(match.group(1))
+                        if num > start_id:
+                            start_id = num
+        # ----------------------------
+
         for file_idx in range(total_files):
             start_idx = file_idx * errors_per_file
             end_idx   = min(start_idx + errors_per_file, total_errors)
             chunk     = error_clusters[start_idx:end_idx]
 
-            # TẠO TÊN FILE MỚI: Chỉ gồm [Tên folder]_[Số thứ tự]
-            # VD: Tap_01_1.txt, Tap_01_2.txt
-            new_file_name = f"{folder_name}_{file_idx + 1}{ext}"
+            # TẠO TÊN FILE MỚI: Tự động đếm tiếp từ ID lớn nhất
+            new_file_name = f"{folder_name}_{start_id + file_idx + 1}{ext}"
             chunk_filename = os.path.join(out_dir, new_file_name)
 
             with open(chunk_filename, 'w', encoding='utf-8') as f:
@@ -851,7 +864,7 @@ def save_reports(error_clusters, output_filename, total_blocks, count_critical,
         log_callback(f"   ↳ ❌ Lỗi khi lưu file báo cáo: {e}")
 
 
-def analyze_srt_to_file(in_path, out_path, errors_per_file=80,
+def analyze_srt_to_file(in_path, out_path, errors_per_file=30,
                         log_callback=print, scan_mode='all',
                         check_pause_callback=None):
     """

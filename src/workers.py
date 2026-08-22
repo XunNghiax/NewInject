@@ -333,7 +333,7 @@ class ProcessWorker(QThread):
                         if global_retry_count > 0:
                             missing_files = []
                             for cn_file in cn_files:
-                                expected_vi = cn_file.replace('_cn.srt', '_vi.srt')
+                                expected_vi = f"{os.path.splitext(cn_file)[0]}_vi.srt"
                                 if expected_vi not in vi_files:
                                     missing_files.append(expected_vi)
                             self.emit_log(f"⚠️ Phát hiện thiếu {len(missing_files)} file: {', '.join(missing_files)}", "warning")

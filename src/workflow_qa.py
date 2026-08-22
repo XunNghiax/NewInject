@@ -64,36 +64,51 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
     current_profile = available_profiles[current_profile_idx]
     log_callback(f"📋 Tìm thấy {len(available_profiles)} Profile Chrome: {', '.join(available_profiles)} (Bắt đầu vá lỗi với [{current_profile}])")
 
-    from src.gemini_bot import GeminiBot
+    from src.gemini_bot import GeminiBot, is_profile_in_cooldown, get_next_available_pro_profile, record_profile_cooldown
+
+    # --- BLOCKER: Chờ 60 phút ở vòng ngoài nếu TẤT CẢ profile đều bị khóa ---
+    while True:
+        in_cd, rem_str, _ = is_profile_in_cooldown(current_profile)
+        if in_cd:
+            next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
+            if next_p:
+                log_callback(f"⏩ [CẢNH BÁO] Profile [{current_profile}] đang chờ (Còn {rem_str}). Đã chuyển sang: [{next_p}]", "warning")
+                current_profile = next_p
+                current_profile_idx = available_profiles.index(next_p)
+                break
+            else:
+                log_callback("🛑 CẢNH BÁO: TOÀN BỘ Profile đều bị phạt 5 tiếng! Ngủ đông 60 phút chờ hồi phục (không tốn RAM)...")
+                countdown_sleep(3600, log_callback, "⏳ Đang ngủ đông:")
+        else:
+            break
+    # -----------------------------------------------------------------------
 
     with sync_playwright() as p:
         bot = GeminiBot(log_callback=log_callback)
         browser, page, model_status = bot.launch(p, current_profile, prompt_file, check_pause_callback)
         
         while model_status == "FLASH_LITE":
-            start_idx = current_profile_idx
-            switched_ok = False
-            while True:
-                current_profile_idx = (current_profile_idx + 1) % len(available_profiles)
-                if current_profile_idx == start_idx:
-                    break
-                next_profile = available_profiles[current_profile_idx]
-                log_callback(f"🔄 Profile ban đầu [{current_profile}] bị hạ cấp Flash-Lite. TỰ ĐỘNG CHUYỂN SANG: [{next_profile}]...", "info")
+            record_profile_cooldown(current_profile, 5.0, log_callback)
+            next_p = get_next_available_pro_profile(current_profile, available_profiles, log_callback)
+            if next_p:
+                log_callback(f"🔄 Profile ban đầu [{current_profile}] bị hết ngạch 5h. TỰ ĐỘNG BỎ QUA & CHUYỂN SANG: [{next_p}]...", "info")
                 try: browser.close()
                 except Exception: pass
-                current_profile = next_profile
+                current_profile = next_p
+                current_profile_idx = available_profiles.index(next_p)
                 browser, page, model_status = bot.launch(p, current_profile, prompt_file, check_pause_callback)
                 if model_status != "FLASH_LITE":
-                    switched_ok = True
                     log_callback(f"✅ ĐÃ CHUYỂN SANG PROFILE [{current_profile}] THÀNH CÔNG DÙNG MÔ HÌNH PRO! 🚀", "success")
                     break
-
-            if not switched_ok:
+            else:
                 log_callback("🛑 TẤT CẢ CÁC PROFILE CHROME ĐỀU ĐÃ HẾT HẠN MỨC PRO! Tạm dừng 60 phút...")
                 countdown_sleep(3600, log_callback, "⏳ Đang chờ hồi phục:")
-                page.goto("https://gemini.google.com/app", timeout=60000)
-                page.wait_for_load_state("load")
-                time.sleep(5)
+                try:
+                    page.goto("https://gemini.google.com/app", timeout=60000)
+                    page.wait_for_load_state("load")
+                    time.sleep(5)
+                except Exception:
+                    pass
                 status, _ = bot.check_model_status()
                 model_status = status
                 if model_status != "FLASH_LITE":

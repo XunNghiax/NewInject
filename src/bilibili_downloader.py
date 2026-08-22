@@ -188,7 +188,7 @@ class BilibiliDownloader:
             "fragment_retries": 10,
             "retries": 10,
             "file_access_retries": 5,
-            "http_chunk_size": 10485760,
+            # "http_chunk_size": 10485760,
         }
 
         if FFMPEG_DIR and os.path.exists(FFMPEG_DIR):
