@@ -96,6 +96,8 @@ class GeminiBot:
                                 found_model_text = txt
                                 if any(down in txt.lower() for down in self.DOWNGRADE_KEYWORDS):
                                     if "advanced" not in txt.lower() and "pro" not in txt.lower():
+                                        if self.force_switch_to_pro_model():
+                                            return "NORMAL", "Đã tự động khôi phục về model Pro"
                                         return "FLASH_LITE", f"Đã hạ cấp: {txt}"
                 except Exception:
                     pass
@@ -114,6 +116,40 @@ class GeminiBot:
             self.log(f"⚠️ Cảnh báo khi kiểm tra model: {e}", "warning")
 
         return "NORMAL", "Gemini Pro/Advanced"
+
+    def force_switch_to_pro_model(self) -> bool:
+        """Thử mở Model Picker và chọn lại bản Pro/Advanced nếu vừa hết thời gian cooldown"""
+        self.log("🔄 Phát hiện đang ở model Flash-Lite. Thử tự động chọn lại mô hình Pro/Advanced...")
+        try:
+            for sel in self.MODEL_PICKER_LOCATORS:
+                picker = self.page.locator(sel).first
+                if picker.is_visible():
+                    picker.click(timeout=3000)
+                    self.page.wait_for_timeout(1000)
+                    
+                    menu_items = self.page.locator('[role="menuitemradio"], [role="menuitem"]').all()
+                    if menu_items:
+                        # Thử tìm mục có chữ 'pro' hoặc 'advanced'
+                        for item in menu_items:
+                            text = item.inner_text().lower()
+                            if "pro" in text or "advanced" in text or "tư duy" in text:
+                                self.log(f"✅ Đã tìm thấy model chuẩn: {text.strip().replace(chr(10), ' ')}. Đang chọn...")
+                                item.click(timeout=2000)
+                                self.page.wait_for_timeout(1500)
+                                return True
+                                
+                        # Nếu không có chữ rõ ràng, thử chọn index 2 (Mặc định model xịn thường nằm ở vị trí thứ 3)
+                        if len(menu_items) >= 3:
+                            self.log("✅ Chọn theo vị trí thứ 3...")
+                            menu_items[2].click(timeout=2000)
+                            self.page.wait_for_timeout(1500)
+                            return True
+                    
+                    # Click ra body để đóng menu nếu không thao tác được
+                    self.page.locator("body").click(position={"x": 0, "y": 0})
+        except Exception as e:
+            self.log(f"⚠️ Không thể tự động chọn lại model: {e}", "warning")
+        return False
 
     def send_initial_prompt(self, prompt_file_path: str, check_pause_callback: Optional[Callable] = None):
         initial_count = self.page.locator(self.RESPONSE_TEXT_LOCATOR).count()

@@ -712,11 +712,7 @@ class MainWindowV2(QMainWindow):
         self.txt_log_search.setPlaceholderText("Tìm từ khóa trong log...")
         self.txt_log_search.textChanged.connect(self.filter_logs)
 
-        self.chk_autoscroll = QCheckBox("📌 AutoScroll")
-        self.chk_autoscroll.setObjectName("AutoScrollCheck")
-        self.chk_autoscroll.setChecked(True)
-        self.chk_autoscroll.toggled.connect(self.save_user_config)
-
+        # Removed AutoScroll check box per smart scroll update
         self.btn_copy_log = QPushButton("📋 Sao Chép Log")
         self.btn_copy_log.setObjectName("BtnSmall")
         self.btn_copy_log.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -730,7 +726,7 @@ class MainWindowV2(QMainWindow):
         console_toolbar.addWidget(lbl_filter)
         console_toolbar.addWidget(self.cbo_log_level)
         console_toolbar.addWidget(self.txt_log_search, stretch=1)
-        console_toolbar.addWidget(self.chk_autoscroll)
+        # console_toolbar.addWidget(self.chk_autoscroll)
         console_toolbar.addWidget(self.btn_copy_log)
         console_toolbar.addWidget(self.btn_clear_log)
 
@@ -890,6 +886,10 @@ class MainWindowV2(QMainWindow):
     def set_badge_style(self, label: QLabel, bg_color: str, text_color: str = "white"):
         label.setStyleSheet(f"background-color: {bg_color}; color: {text_color}; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid {bg_color}; min-height: 28px; max-height: 28px; height: 28px;")
 
+    def update_dynamic_badge(self, text: str, bg_color: str):
+        self.lbl_system_badge.setText(text)
+        self.set_badge_style(self.lbl_system_badge, bg_color, "white")
+
     def update_cookie_badge_status(self):
         os.makedirs("./user_data/cookies", exist_ok=True)
         possible_files = ["./user_data/cookies/cookies.txt", "./user_data/cookies.txt", "./cookies.txt"]
@@ -976,8 +976,7 @@ class MainWindowV2(QMainWindow):
             self.chk_enable_tts.setChecked(enable_tts)
         if hasattr(self, 'chk_auto_inject_capcut'):
             self.chk_auto_inject_capcut.setChecked(auto_inject_capcut)
-        if hasattr(self, 'chk_autoscroll'):
-            self.chk_autoscroll.setChecked(autoscroll)
+        # autoscroll load removed
 
         self.append_log("⚙️ Đã nạp cấu hình đã lưu thành công.", "info")
 
@@ -993,7 +992,7 @@ class MainWindowV2(QMainWindow):
             "last_ref_text": self.txt_ref_text.text().strip(),
             "enable_tts": self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True,
             "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
-            "autoscroll": self.chk_autoscroll.isChecked() if hasattr(self, 'chk_autoscroll') else True
+            # "autoscroll" removed
         }
         ConfigManager.save_config(cfg)
 
@@ -1289,6 +1288,7 @@ class MainWindowV2(QMainWindow):
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_local_progress)
         self.worker.global_progress_signal.connect(self.update_global_progress)
+        self.worker.badge_signal.connect(self.update_dynamic_badge)
         self.worker.step_signal.connect(self.stepper_widget.set_step)
         self.worker.request_gradio_link_signal.connect(self.on_request_gradio_link)
         self.worker.finished_signal.connect(self.on_process_finished)
@@ -1455,9 +1455,16 @@ class MainWindowV2(QMainWindow):
         color = color_map.get(level.lower(), "#e2e8f0")
         formatted = f'<span style="color: #64748b;">{timestamp}</span> <span style="color: {color}; font-weight: 500;">{msg}</span>'
 
+        # 1. Bắt vị trí hiện tại của thanh cuộn TRƯỚC KHI in log mới
+        scrollbar = self.txt_console.verticalScrollBar()
+        is_at_bottom = scrollbar.value() >= scrollbar.maximum() - 5
+        
+        # 2. Bơm dòng log mới vào màn hình
         self.txt_console.append(formatted)
-        if self.chk_autoscroll.isChecked():
-            self.txt_console.moveCursor(QTextCursor.MoveOperation.End)
+        
+        # 3. Quyết định cuộn (Smart Scroll)
+        if is_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
 
     def filter_logs(self):
         query = self.txt_log_search.text().strip().lower()

@@ -11,4 +11,4 @@
 .bilibili.com	TRUE	/	TRUE	1787442436	bili_jct	ceec40e8dbb5fe8440a229692e02e1fa
 .bilibili.com	TRUE	/	TRUE	1787442436	DedeUserID	3706986138962005
 .bilibili.com	TRUE	/	TRUE	1787442436	DedeUserID__ckMd5	10b1f512a1cdd56b
-.bilibili.com	TRUE	/	FALSE	0	sid	gy7oo0ed
+.bilibili.com	TRUE	/	FALSE	0	sid	5d7gf4dr

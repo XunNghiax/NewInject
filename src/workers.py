@@ -111,6 +111,7 @@ class ProcessWorker(QThread):
     step_signal = pyqtSignal(int)             # Active step index (1-6)
     finished_signal = pyqtSignal(bool, str)   # (success, final_message)
     request_gradio_link_signal = pyqtSignal() # Yêu cầu người dùng nhập link Gradio khi tới Bước 5
+    badge_signal = pyqtSignal(str, str)       # Tín hiệu cập nhật UI System Badge (text, màu nền)
 
     def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = "", fast_forward_mode: bool = False):
         super().__init__()
@@ -210,6 +211,7 @@ class ProcessWorker(QThread):
                     self.emit_log(f"⚠️ Cảnh báo: Không thể xóa file output.srt cũ. Vui lòng đóng các app đang mở file này để tránh lỗi hiển thị! ({e})", "warning")
 
             # ── BƯỚC 1: DOWNLOAD / NẠP NGUỒN MEDIA ──
+            self.badge_signal.emit("📥 ĐANG TẢI NGUỒN", "#0891b2")
             self.step_signal.emit(1)
             self.global_progress_signal.emit(5, "⚡ 1. Khởi động Tải Video / Nạp Nguồn...")
             self.emit_log("==================================================", "info")
@@ -257,6 +259,7 @@ class ProcessWorker(QThread):
             else:
     
                 # ── BƯỚC 2: SPEECH-TO-TEXT (WHISPER STT) ──
+                self.badge_signal.emit("📝 ĐANG BÓC BĂNG", "#4f46e5")
                 self.step_signal.emit(2)
                 has_cn_splits = os.path.exists(cn_folder) and any(f.endswith('.srt') for f in os.listdir(cn_folder))
     
@@ -298,12 +301,14 @@ class ProcessWorker(QThread):
                     self.emit_log(f"📁 Chia nhỏ tệp SRT thành block 100 câu lưu vào: {cn_folder}...", "info")
                     os.makedirs(cn_folder, exist_ok=True)
                     if split_srt_file:
+                        self.badge_signal.emit("✂️ ĐANG CẮT FILE", "#6366f1")
                         prefix_path = os.path.join(cn_folder, "part")
                         split_srt_file(srt_08, output_prefix=prefix_path, blocks_per_file=100, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl))
                 else:
                     self.emit_log(f"✅ Đã tìm thấy thư mục phụ đề gốc: {cn_folder}", "info")
     
                 # ── BƯỚC 3: DỊCH THUẬT AI & SO KHỚP TIMECODE 100% ──
+                self.badge_signal.emit("🤖 AI ĐANG DỊCH", "#2563eb")
                 self.emit_progress(0, "Chuẩn bị dịch thuật AI...")
                 self.step_signal.emit(3)
                 self.global_progress_signal.emit(45, "3. Đang chạy Gemini AI dịch Tiếng Việt & kiểm tra Timecode...")
@@ -365,6 +370,7 @@ class ProcessWorker(QThread):
                 self.emit_log("💡 (Không tạo output.srt trung gian ở bước này để tránh nhầm lẫn với bản dịch chưa qua QA)", "info")
     
                 # ── BƯỚC 4: AUTO QA TRỰC TIẾP TRÊN TỪNG PART & SỬA TRONG THƯ MỤC FIXED ──
+                self.badge_signal.emit("🕵️ ĐANG VÁ LỖI (QA)", "#ea580c")
                 self.emit_progress(0, "Chuẩn bị Auto QA...")
                 
                 self.global_progress_signal.emit(65, "4. Đang kiểm tra QA & tự động sửa lỗi trực tiếp trên từng part...")
@@ -389,7 +395,7 @@ class ProcessWorker(QThread):
                             shutil.copy2(src_p, dst_p)
     
                 # Vòng lặp Iterative Healing
-                max_qa_passes = 2
+                max_qa_passes = 5
                 for pass_idx in range(max_qa_passes):
                     self.emit_log(f"🔄 Đang chạy vòng lặp QA lần {pass_idx + 1}/{max_qa_passes}...")
                     
@@ -449,6 +455,7 @@ class ProcessWorker(QThread):
                     return
 
             # ── BƯỚC 5: SINH AUDIO (TTS GRADIO) VỚI ĐIỂM DỪNG THÔNG MINH (JUST-IN-TIME) ──
+            self.badge_signal.emit("🎙️ ĐANG TẠO GIỌNG", "#d946ef")
             self.step_signal.emit(5)
             if self.enable_tts:
                 self.global_progress_signal.emit(80, "5. Kiểm tra kết nối Gradio TTS Server...")
@@ -463,6 +470,7 @@ class ProcessWorker(QThread):
                 self.emit_log(f"🎙️ Kết nối Gradio TTS Server thành công ({self.gradio_url})! Đang sinh Audio từ file chuẩn output.srt...", "success")
 
             # ── BƯỚC 6: CAPCUT DRAFT INJECT ──
+            self.badge_signal.emit("💉 ĐANG NHÚNG CAPCUT", "#16a34a")
             self.step_signal.emit(6)
             if self.auto_inject_capcut and self.capcut_draft_path and os.path.exists(self.capcut_draft_path):
                 self.global_progress_signal.emit(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
