@@ -85,8 +85,87 @@ class CapCutBackend:
     def estimate_read_duration_ms(self, text):
         return int((len(text) / READ_RATE_CHARS_PER_SEC) * 1000)
 
+    def clean_text_natural(self, text):
+        # Chỉ xóa thẻ HTML <>, giữ lại biểu cảm [] và ()
+        text = re.sub(r'<[^>]+>', '', text)
+        text = text.replace('\n', ' ')
+        return re.sub(r'\s+', ' ', text).strip()
+
+    def run_natural_audio_process(self):
+        t_start = time.time()
+        self.log_fn("\n------------------------")
+        self.log_fn("🚀 CHẾ ĐỘ CHỈ TẠO AUDIO TỰ NHIÊN (ĐỘC LẬP)")
+        
+        if not os.path.exists(self.cfg['SRT_FILE_PATH']):
+            raise FileNotFoundError(f"Không tìm thấy file phụ đề tại: {self.cfg['SRT_FILE_PATH']}")
+            
+        subs = pysrt.open(self.cfg['SRT_FILE_PATH'], encoding="utf-8")
+        
+        # Gom text và tách câu
+        full_text = " ".join([self.clean_text_natural(sub.text) for sub in subs if sub.text.strip()])
+        # Tách dựa trên . ? ! (Giữ lại dấu câu)
+        sentences = re.split(r'(?<=[.!?])\s+', full_text.strip())
+        sentences = [s.strip() for s in sentences if s.strip()]
+        
+        self.log_fn(f"✅ Đã gom và tách thành {len(sentences)} câu hoàn chỉnh.")
+        
+        audio_out_dir = self.cfg['AUDIO_OUT_DIR']
+        os.makedirs(audio_out_dir, exist_ok=True)
+        
+        try:
+            client = Client(self.cfg['SERVER_URL'])
+            client.timeout = 120
+            uploaded_ref = handle_file(self.cfg['REF_AUDIO_PATH'])
+        except Exception as e:
+            raise RuntimeError(f"Thất bại khi kết nối Gradio: {e}")
+
+        combined_audio = AudioSegment.silent(duration=0)
+        
+        for i, text in enumerate(sentences, 1):
+            if self.check_pause_callback:
+                self.check_pause_callback()
+                
+            self.log_fn(f"⏳ [Đang tạo {i}/{len(sentences)}]: \"{text[:40]}...\"")
+            
+            MAX_RETRIES = 3
+            attempt = 0
+            success = False
+            
+            while attempt <= MAX_RETRIES and not success:
+                try:
+                    # Chú ý: tăng ns=50 cho chất lượng tốt hơn
+                    result = client.predict(
+                        text=text, lang="Vietnamese", ref_aud=uploaded_ref, ref_text=self.cfg['REF_TEXT'], 
+                        instruct="", ns=50, gs=2.0, dn=True, sp=1.0, du=0, pp=True, po=True, api_name="/_clone_fn"
+                    )
+                    
+                    audio_segment = AudioSegment.from_file(result[0])
+                    # Nối vào audio tổng (có thể thêm 200ms khoảng lặng giữa các câu để tự nhiên hơn)
+                    combined_audio += audio_segment + AudioSegment.silent(duration=200)
+                    success = True
+                except Exception as e:
+                    attempt += 1
+                    if attempt <= MAX_RETRIES:
+                        self.log_fn(f"🔄 [Thử lại {attempt}/{MAX_RETRIES}] Câu {i} gặp sự cố: {e}")
+                        time.sleep(2)
+                    else:
+                        raise RuntimeError(f"❌ [LỖI] Câu {i} thất bại hoàn toàn sau 3 lần thử: {e}")
+            
+            self.progress_fn(i, len(sentences), "Tạo giọng nói Tự nhiên")
+
+        # Xuất file tổng
+        final_wav_path = os.path.join(audio_out_dir, "Natural_Voice_Full.wav")
+        combined_audio.export(final_wav_path, format="wav")
+        self.log_fn(f"\n🎉 Đã xuất thành công file Audio tự nhiên tại: {final_wav_path}")
+        
+        return str(timedelta(seconds=int(time.time() - t_start)))
+
     def run_process(self, only_inject=False):
         t_start = time.time()
+        
+        if self.cfg.get('CREATE_NATURAL_AUDIO_ONLY', False):
+            return self.run_natural_audio_process()
+            
         audio_data = []
         
         speed_ratio = round(float(self.cfg.get('SPEED_RATIO', 1.0)), 4)

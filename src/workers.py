@@ -471,10 +471,33 @@ class ProcessWorker(QThread):
                 self.global_progress_signal.emit(85, "5. Đang sinh Audio bằng Gradio TTS Server...")
                 self.emit_log(f"🎙️ Kết nối Gradio TTS Server thành công ({self.gradio_url})! Đang sinh Audio từ file chuẩn output.srt...", "success")
 
-            # ── BƯỚC 6: CAPCUT DRAFT INJECT ──
-            self.badge_signal.emit("💉 ĐANG NHÚNG CAPCUT", "#16a34a")
+            # ── BƯỚC 6: CAPCUT DRAFT INJECT HOẶC SINH AUDIO ĐỘC LẬP ──
+            if self.workflow_mode == "audio_only":
+                self.badge_signal.emit("🎵 ĐANG TẠO AUDIO", "#16a34a")
+            else:
+                self.badge_signal.emit("💉 ĐANG NHÚNG CAPCUT", "#16a34a")
             self.step_signal.emit(6)
-            if self.auto_inject_capcut and self.capcut_draft_path and os.path.exists(self.capcut_draft_path):
+            
+            if self.workflow_mode == "audio_only":
+                self.global_progress_signal.emit(92, "6. Đang tạo file Audio Tự nhiên Độc lập (Audio Only)...")
+                self.emit_log("🎙️ Bắt đầu sinh Audio Tự nhiên (Bỏ qua CapCut)...", "info")
+                if CapCutBackend:
+                    try:
+                        cfg = {
+                            "SRT_FILE_PATH": final_srt_path,
+                            "AUDIO_OUT_DIR": os.path.join(root_downloads, f"voice_{raw_title}_Natural"),
+                            "SERVER_URL": self.gradio_url,
+                            "REF_AUDIO_PATH": self.ref_audio_path,
+                            "REF_TEXT": self.ref_text,
+                            "SPEED_RATIO": 1.0,
+                            "CREATE_NATURAL_AUDIO_ONLY": True
+                        }
+                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
+                        backend.run_process()
+                        self.emit_log("🎉 ĐÃ TẠO XONG FILE AUDIO TỰ NHIÊN ĐỘC LẬP!", "success")
+                    except Exception as audio_e:
+                        self.emit_log(f"⚠️ Thất bại khi tạo Audio tự nhiên: {audio_e}", "warning")
+            elif self.auto_inject_capcut and self.capcut_draft_path and os.path.exists(self.capcut_draft_path):
                 self.global_progress_signal.emit(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
                 self.emit_log(f"💉 Bơm phụ đề vào CapCut Draft: {self.capcut_draft_path}...", "info")
                 
@@ -491,7 +514,8 @@ class ProcessWorker(QThread):
                             "SERVER_URL": self.gradio_url,
                             "REF_AUDIO_PATH": self.ref_audio_path,
                             "REF_TEXT": self.ref_text,
-                            "SPEED_RATIO": 1.25
+                            "SPEED_RATIO": 1.25,
+                            "CREATE_NATURAL_AUDIO_ONLY": False
                         }
                         backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
                         backend.ensure_capcut_closed()
