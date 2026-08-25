@@ -530,6 +530,11 @@ class ProcessWorker(QThread):
                             self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")
                     except Exception as inject_e:
                         self.emit_log(f"⚠️ Thất bại khi nhúng vào CapCut: {inject_e}", "warning")
+                else:
+                    if not CapCutBackend:
+                        self.emit_log("❌ BỎ QUA NHÚNG CAPCUT: Module backend bị lỗi Import (Thiếu thư viện pysrt, pydub, psutil hoặc file backend.py bị lỗi).", "warning")
+                    elif not os.path.exists(draft_json):
+                        self.emit_log(f"❌ BỎ QUA NHÚNG CAPCUT: Không tìm thấy file {draft_json}. Hãy chắc chắn bạn đã chọn đúng thư mục dự án CapCut!", "warning")
 
             self.global_progress_signal.emit(100, "HOÀN TẤT DỰ ÁN! 🎉")
             self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 Phụ đề lưu tại: {final_srt_path}")
