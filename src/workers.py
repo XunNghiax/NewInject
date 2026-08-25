@@ -508,7 +508,8 @@ class ProcessWorker(QThread):
                     draft_json = self.capcut_draft_path
                 else:
                     draft_json = os.path.join(self.capcut_draft_path, "draft_content.json")
-                if os.path.exists(draft_json) and CapCutBackend:
+                    
+                if CapCutBackend:
                     try:
                         cfg = {
                             "SRT_FILE_PATH": final_srt_path,
@@ -533,8 +534,6 @@ class ProcessWorker(QThread):
                 else:
                     if not CapCutBackend:
                         self.emit_log("❌ BỎ QUA NHÚNG CAPCUT: Module backend bị lỗi Import (Thiếu thư viện pysrt, pydub, psutil hoặc file backend.py bị lỗi).", "warning")
-                    elif not os.path.exists(draft_json):
-                        self.emit_log(f"❌ BỎ QUA NHÚNG CAPCUT: Không tìm thấy file {draft_json}. Hãy chắc chắn bạn đã chọn đúng thư mục dự án CapCut!", "warning")
 
             self.global_progress_signal.emit(100, "HOÀN TẤT DỰ ÁN! 🎉")
             self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 Phụ đề lưu tại: {final_srt_path}")
