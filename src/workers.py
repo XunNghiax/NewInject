@@ -457,19 +457,20 @@ class ProcessWorker(QThread):
                     return
 
             # ── BƯỚC 5: SINH AUDIO (TTS GRADIO) VỚI ĐIỂM DỪNG THÔNG MINH (JUST-IN-TIME) ──
-            self.badge_signal.emit("🎙️ ĐANG TẠO GIỌNG", "#d946ef")
-            self.step_signal.emit(5)
-            if self.enable_tts:
+            def ensure_gradio_alive():
+                if not self.enable_tts:
+                    return self.gradio_url
                 self.global_progress_signal.emit(80, "5. Kiểm tra kết nối Gradio TTS Server...")
                 while not self.check_gradio_connection(self.gradio_url):
-                    self.emit_log("⏸️ [ĐIỂM DỪNG THÔNG MINH] File output.srt đã hoàn thiện 100%!", "warning")
+                    self.emit_log("⏸️ [ĐIỂM DỪNG THÔNG MINH] Đang bị thiếu file audio. Vui lòng nhập link Gradio mới!", "warning")
                     self.emit_log("👉 Hãy mở Google Colab lấy link Gradio mới (https://xxxx.gradio.live), dán vào ô 'Gradio URL' rồi bấm '▶️ TIẾP TỤC'!", "info")
                     self.request_gradio_link_signal.emit()
                     self.pause()
                     self.check_pause()
 
                 self.global_progress_signal.emit(85, "5. Đang sinh Audio bằng Gradio TTS Server...")
-                self.emit_log(f"🎙️ Kết nối Gradio TTS Server thành công ({self.gradio_url})! Đang sinh Audio từ file chuẩn output.srt...", "success")
+                self.emit_log(f"🎙️ Kết nối Gradio TTS Server thành công ({self.gradio_url})! Đang sinh Audio...", "success")
+                return self.gradio_url
 
             # ── BƯỚC 6: CAPCUT DRAFT INJECT HOẶC SINH AUDIO ĐỘC LẬP ──
             if self.workflow_mode == "audio_only":
@@ -499,7 +500,8 @@ class ProcessWorker(QThread):
                             progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), 
                             check_pause_callback=self.check_pause,
                             global_progress_callback=lambda p, s: self.global_progress_signal.emit(p, s),
-                            step_callback=lambda s: self.step_signal.emit(s)
+                            step_callback=lambda s: self.step_signal.emit(s),
+                            ensure_gradio_alive_callback=ensure_gradio_alive
                         )
                         backend.run_process()
                         self.emit_log("🎉 ĐÃ TẠO XONG FILE AUDIO TỰ NHIÊN ĐỘC LẬP!", "success")
@@ -532,7 +534,8 @@ class ProcessWorker(QThread):
                             progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), 
                             check_pause_callback=self.check_pause,
                             global_progress_callback=lambda p, s: self.global_progress_signal.emit(p, s),
-                            step_callback=lambda s: self.step_signal.emit(s)
+                            step_callback=lambda s: self.step_signal.emit(s),
+                            ensure_gradio_alive_callback=ensure_gradio_alive
                         )
                         backend.ensure_capcut_closed()
                         backend.run_process(only_inject=not self.enable_tts)

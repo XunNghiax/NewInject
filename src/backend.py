@@ -32,13 +32,14 @@ MAX_GAP_MS = 500
 MAX_CHARS_PER_GROUP = 75
 
 class CapCutBackend:
-    def __init__(self, config, log_callback=None, progress_callback=None, check_pause_callback=None, global_progress_callback=None, step_callback=None):
+    def __init__(self, config, log_callback=None, progress_callback=None, check_pause_callback=None, global_progress_callback=None, step_callback=None, ensure_gradio_alive_callback=None):
         self.cfg = config
         self.log_fn = log_callback if log_callback else print
         self.progress_fn = progress_callback if progress_callback else (lambda d, t, p: None)
         self.check_pause_callback = check_pause_callback
         self.global_progress_fn = global_progress_callback if global_progress_callback else (lambda p, s: None)
         self.step_fn = step_callback if step_callback else (lambda s: None)
+        self.ensure_gradio_alive_fn = ensure_gradio_alive_callback
 
     def ensure_capcut_closed(self):
         """Kiểm tra và ép đóng tiến trình CapCut để tránh lỗi Permission Denied"""
@@ -115,19 +116,46 @@ class CapCutBackend:
         
         audio_out_dir = self.cfg['AUDIO_OUT_DIR']
         os.makedirs(audio_out_dir, exist_ok=True)
+        final_wav_path = os.path.join(audio_out_dir, "Natural_Voice_Full.wav")
         
-        try:
-            client = Client(self.cfg['SERVER_URL'])
-            client.timeout = 120
-            uploaded_ref = handle_file(self.cfg['REF_AUDIO_PATH'])
-        except Exception as e:
-            raise RuntimeError(f"Thất bại khi kết nối Gradio: {e}")
+        if os.path.exists(final_wav_path) and os.path.getsize(final_wav_path) > 1000:
+            self.log_fn(f"⏩ [Resume] Đã tìm thấy file Audio hoàn chỉnh trước đó ({final_wav_path}). Bỏ qua bước tạo lại!")
+            self.progress_fn(len(sentences), len(sentences), "Tạo giọng nói Tự nhiên")
+            return "0:00:00"
 
-        combined_audio = AudioSegment.silent(duration=0)
+        temp_dir = os.path.join(audio_out_dir, "temp_parts")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_files = []
+        
+        # Quét kiểm tra file tạm
+        missing_indices = []
+        for i in range(1, len(sentences) + 1):
+            temp_wav_path = os.path.join(temp_dir, f"part_{i:04d}.wav")
+            if not (os.path.exists(temp_wav_path) and os.path.getsize(temp_wav_path) > 0):
+                missing_indices.append(i)
+                
+        if missing_indices:
+            if self.ensure_gradio_alive_fn:
+                self.cfg['SERVER_URL'] = self.ensure_gradio_alive_fn()
+            try:
+                client = Client(self.cfg['SERVER_URL'])
+                client.timeout = 120
+                uploaded_ref = handle_file(self.cfg['REF_AUDIO_PATH'])
+            except Exception as e:
+                raise RuntimeError(f"Thất bại khi kết nối Gradio: {e}")
+        else:
+            self.log_fn("⏩ [Resume] Tiến trình file tạm đã hoàn tất 100% trước đó, bỏ qua gọi Gradio API!")
         
         for i, text in enumerate(sentences, 1):
             if self.check_pause_callback:
                 self.check_pause_callback()
+                
+            temp_wav_path = os.path.join(temp_dir, f"part_{i:04d}.wav")
+            if i not in missing_indices:
+                self.log_fn(f"✨ [Resume] Tìm thấy file tạm part_{i:04d}.wav. Bỏ qua tạo lại câu này.")
+                temp_files.append(temp_wav_path)
+                self.progress_fn(i, len(sentences), "Tạo giọng nói Tự nhiên")
+                continue
                 
             self.log_fn(f"⏳ [Đang tạo {i}/{len(sentences)}]: \"{text[:40]}...\"")
             
@@ -144,8 +172,23 @@ class CapCutBackend:
                     )
                     
                     audio_segment = AudioSegment.from_file(result[0])
-                    # Nối vào audio tổng (có thể thêm 200ms khoảng lặng giữa các câu để tự nhiên hơn)
-                    combined_audio += audio_segment + AudioSegment.silent(duration=200)
+                    # Nối 200ms khoảng lặng vào cuối câu hiện tại
+                    audio_segment += AudioSegment.silent(duration=200)
+                    
+                    # Lưu thành file tạm và giải phóng RAM
+                    temp_wav_path = os.path.join(temp_dir, f"part_{i:04d}.wav")
+                    audio_segment.export(temp_wav_path, format="wav")
+                    temp_files.append(temp_wav_path)
+                    
+                    self.log_fn(f"💾 [Câu {i}] Đã lưu file tạm part_{i:04d}.wav vào ổ cứng.")
+                    
+                    del audio_segment
+                    try:
+                        os.remove(result[0]) # Xóa file rác từ Gradio
+                        self.log_fn(f"🧹 [Câu {i}] Đã xóa file rác Gradio và giải phóng RAM thành công.")
+                    except:
+                        pass
+                        
                     success = True
                 except Exception as e:
                     attempt += 1
@@ -157,9 +200,38 @@ class CapCutBackend:
             
             self.progress_fn(i, len(sentences), "Tạo giọng nói Tự nhiên")
 
-        # Xuất file tổng
+        self.log_fn("\n🔄 Đang gộp các phần âm thanh bằng FFmpeg...")
         final_wav_path = os.path.join(audio_out_dir, "Natural_Voice_Full.wav")
-        combined_audio.export(final_wav_path, format="wav")
+        concat_txt_path = os.path.join(temp_dir, "concat.txt")
+        
+        with open(concat_txt_path, "w", encoding="utf-8") as f:
+            for tf in temp_files:
+                f.write(f"file '{os.path.abspath(tf).replace(chr(92), '/')}'\n")
+                
+        import subprocess
+        import shutil
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0", 
+                "-i", concat_txt_path, "-c", "copy", final_wav_path
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.log_fn("⚡ Đã gộp thành công bằng FFmpeg siêu tốc!")
+        except Exception as e:
+            self.log_fn(f"⚠️ Lỗi FFmpeg concat: {e}. Sẽ thử gộp bằng pydub dự phòng.")
+            # Dự phòng nếu FFmpeg lỗi hoặc không có trong môi trường
+            combined_audio = AudioSegment.silent(duration=0)
+            for tf in temp_files:
+                combined_audio += AudioSegment.from_file(tf)
+            combined_audio.export(final_wav_path, format="wav")
+            del combined_audio
+
+        # Dọn dẹp thư mục tạm
+        try:
+            shutil.rmtree(temp_dir)
+            self.log_fn("✅ Đã dọn dẹp sạch sẽ toàn bộ thư mục rác tạm thời.")
+        except Exception as e:
+            self.log_fn(f"⚠️ Không thể xóa thư mục tạm: {e}")
+
         self.log_fn(f"\n🎉 Đã xuất thành công file Audio tự nhiên tại: {final_wav_path}")
         
         return str(timedelta(seconds=int(time.time() - t_start)))
@@ -295,6 +367,8 @@ class CapCutBackend:
                 self.log_fn("⏩ Tiến trình voice đã hoàn tất 100% trước đó, bỏ qua gọi Gradio API!")
             else:
                 self.log_fn(f"🔄 Tiến hành tạo {len(missing_items)} voice còn thiếu thông qua Gradio...")
+                if self.ensure_gradio_alive_fn:
+                    self.cfg['SERVER_URL'] = self.ensure_gradio_alive_fn()
                 try:
                     client = Client(self.cfg['SERVER_URL'])
                     client.timeout = 120
