@@ -1000,10 +1000,17 @@ class MainWindowV2(QMainWindow):
 
     def save_user_config(self):
         from src.config_manager import ConfigManager
+        
+        existing = ConfigManager.load_config()
+        
+        current_url = self.txt_link.toPlainText().strip()
+        current_dir = self.txt_output_dir.toPlainText().strip()
+        current_draft = self.txt_capcut_draft.toPlainText().strip()
+        
         cfg = {
-            "last_url": self.txt_link.toPlainText().strip(),
-            "last_dir": self.txt_output_dir.toPlainText().strip() or "./downloads",
-            "last_draft": self.txt_capcut_draft.toPlainText().strip(),
+            "last_url": current_url if current_url else existing.get("last_url", ""),
+            "last_dir": current_dir if current_dir else existing.get("last_dir", "./downloads"),
+            "last_draft": current_draft if current_draft else existing.get("last_draft", ""),
             "last_profile": self.get_selected_profile(),
             "last_gradio_url": self.txt_gradio_url.text().strip(),
             "last_ref_audio": self.txt_ref_audio.text().strip(),
@@ -1408,13 +1415,13 @@ class MainWindowV2(QMainWindow):
                     json.dump(self.job_queue, f, indent=4, ensure_ascii=False)
                     
                 links = [x.strip() for x in self.txt_link.toPlainText().split('\n') if x.strip()]
-                if links: self.txt_link.setText('\n'.join(links[1:]).strip())
+                if len(links) > 1: self.txt_link.setText('\n'.join(links[1:]).strip())
                 
                 out_dirs = [x.strip() for x in self.txt_output_dir.toPlainText().split('\n') if x.strip()]
-                if out_dirs: self.txt_output_dir.setText('\n'.join(out_dirs[1:]).strip())
+                if len(out_dirs) > 1: self.txt_output_dir.setText('\n'.join(out_dirs[1:]).strip())
                 
                 drafts = [x.strip() for x in self.txt_capcut_draft.toPlainText().split('\n') if x.strip()]
-                if drafts: self.txt_capcut_draft.setText('\n'.join(drafts[1:]).strip())
+                if len(drafts) > 1: self.txt_capcut_draft.setText('\n'.join(drafts[1:]).strip())
                 
                 self.current_job_index += 1
                 from PyQt6.QtCore import QTimer
