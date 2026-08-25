@@ -478,10 +478,8 @@ class ProcessWorker(QThread):
                 self.badge_signal.emit("🧪 ĐANG CHẠY HYBRID", "#16a34a")
             else:
                 self.badge_signal.emit("💉 ĐANG NHÚNG CAPCUT", "#16a34a")
-            self.step_signal.emit(6)
             
             if self.workflow_mode == "audio_only":
-                self.global_progress_signal.emit(92, "6. Đang tạo file Audio Tự nhiên Độc lập (Audio Only)...")
                 self.emit_log("🎙️ Bắt đầu sinh Audio Tự nhiên (Bỏ qua CapCut)...", "info")
                 if CapCutBackend:
                     try:
@@ -495,14 +493,20 @@ class ProcessWorker(QThread):
                             "CREATE_NATURAL_AUDIO_ONLY": True,
                             "EXPERIMENTAL_HYBRID_MODE": False
                         }
-                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
+                        backend = CapCutBackend(
+                            cfg, 
+                            log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), 
+                            progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), 
+                            check_pause_callback=self.check_pause,
+                            global_progress_callback=lambda p, s: self.global_progress_signal.emit(p, s),
+                            step_callback=lambda s: self.step_signal.emit(s)
+                        )
                         backend.run_process()
                         self.emit_log("🎉 ĐÃ TẠO XONG FILE AUDIO TỰ NHIÊN ĐỘC LẬP!", "success")
                     except Exception as audio_e:
                         self.emit_log(f"⚠️ Thất bại khi tạo Audio tự nhiên: {audio_e}", "warning")
             elif self.auto_inject_capcut and self.capcut_draft_path and os.path.exists(self.capcut_draft_path):
-                self.global_progress_signal.emit(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
-                self.emit_log(f"💉 Bơm phụ đề vào CapCut Draft: {self.capcut_draft_path}...", "info")
+                self.emit_log(f"💉 Chuẩn bị nhúng phụ đề vào CapCut Draft: {self.capcut_draft_path}...", "info")
                 
                 if self.capcut_draft_path.lower().endswith(".json"):
                     draft_json = self.capcut_draft_path
@@ -522,7 +526,14 @@ class ProcessWorker(QThread):
                             "CREATE_NATURAL_AUDIO_ONLY": False,
                             "EXPERIMENTAL_HYBRID_MODE": (self.workflow_mode == "hybrid_video")
                         }
-                        backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
+                        backend = CapCutBackend(
+                            cfg, 
+                            log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), 
+                            progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), 
+                            check_pause_callback=self.check_pause,
+                            global_progress_callback=lambda p, s: self.global_progress_signal.emit(p, s),
+                            step_callback=lambda s: self.step_signal.emit(s)
+                        )
                         backend.ensure_capcut_closed()
                         backend.run_process(only_inject=not self.enable_tts)
                         if self.workflow_mode == "hybrid_video":
@@ -536,6 +547,7 @@ class ProcessWorker(QThread):
                         self.emit_log("❌ BỎ QUA NHÚNG CAPCUT: Module backend bị lỗi Import (Thiếu thư viện pysrt, pydub, psutil hoặc file backend.py bị lỗi).", "warning")
 
             self.global_progress_signal.emit(100, "HOÀN TẤT DỰ ÁN! 🎉")
+            self.step_signal.emit(7)
             self.finished_signal.emit(True, f"🎉 ĐÃ HOÀN TẤT TOÀN BỘ DỰ ÁN TỰ ĐỘNG!\n📁 Phụ đề lưu tại: {final_srt_path}")
 
         except Exception as e:

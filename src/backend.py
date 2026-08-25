@@ -32,11 +32,13 @@ MAX_GAP_MS = 500
 MAX_CHARS_PER_GROUP = 75
 
 class CapCutBackend:
-    def __init__(self, config, log_callback=None, progress_callback=None, check_pause_callback=None):
+    def __init__(self, config, log_callback=None, progress_callback=None, check_pause_callback=None, global_progress_callback=None, step_callback=None):
         self.cfg = config
         self.log_fn = log_callback if log_callback else print
         self.progress_fn = progress_callback if progress_callback else (lambda d, t, p: None)
         self.check_pause_callback = check_pause_callback
+        self.global_progress_fn = global_progress_callback if global_progress_callback else (lambda p, s: None)
+        self.step_fn = step_callback if step_callback else (lambda s: None)
 
     def ensure_capcut_closed(self):
         """Kiểm tra và ép đóng tiến trình CapCut để tránh lỗi Permission Denied"""
@@ -92,6 +94,8 @@ class CapCutBackend:
         return re.sub(r'\s+', ' ', text).strip()
 
     def run_natural_audio_process(self):
+        self.step_fn(6)
+        self.global_progress_fn(92, "6. Đang tạo file Audio Tự nhiên Độc lập (Audio Only)...")
         t_start = time.time()
         self.log_fn("\n------------------------")
         self.log_fn("🚀 CHẾ ĐỘ CHỈ TẠO AUDIO TỰ NHIÊN (ĐỘC LẬP)")
@@ -253,6 +257,8 @@ class CapCutBackend:
             raise RuntimeError("File phụ đề SRT trống, không có dữ liệu để chạy!")
 
         if not only_inject:
+            self.step_fn(5)
+            self.global_progress_fn(85, "5. Đang sinh Audio bằng Gradio TTS Server...")
             self.log_fn("\n------------------------")
             self.log_fn("🔌 BƯỚC 2: KẾT NỐI SERVER GRADIO VÀ SINH AUDIO...")
             
@@ -403,6 +409,8 @@ class CapCutBackend:
         if not audio_data:
             raise RuntimeError("Không thu thập được file âm thanh hợp lệ nào!")
 
+        self.step_fn(6)
+        self.global_progress_fn(92, "6. Đang bơm phụ đề trực tiếp vào dự án CapCut PC...")
         self.log_fn("\n------------------------")
         self.ensure_capcut_closed()
         self.log_fn("💉 BƯỚC 3: XỬ LÝ TIMELINE & BƠM VÀO CAPCUT...")
