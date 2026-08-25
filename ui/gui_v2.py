@@ -254,7 +254,7 @@ class MainWindowV2(QMainWindow):
         # NÚT BÁO TRẠNG THÁI COOKIE BILIBILI VIP TRÊN HEADER
         self.btn_login_bilibili = QToolButton()
         self.btn_login_bilibili.setText("🍪 Bilibili : Chưa Login")
-        self.btn_login_bilibili.setMinimumWidth(185)
+        self.btn_login_bilibili.setMinimumWidth(100)
         self.btn_login_bilibili.setFixedHeight(28)
         self.btn_login_bilibili.setObjectName("ToolBtn")
         self.btn_login_bilibili.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -324,9 +324,11 @@ class MainWindowV2(QMainWindow):
         link_box = QHBoxLayout()
         link_box.setSpacing(6)
         self.txt_link = QTextEdit()
-        self.txt_link.setFixedHeight(65)
-        self.txt_link.setObjectName("MasterInput")
+        self.txt_link.setObjectName("MasterTextEdit")
+        self.txt_link.document().setDocumentMargin(0)
         self.txt_link.setPlaceholderText("Dán danh sách Link Bilibili (mỗi link 1 dòng)...")
+        self.txt_link.textChanged.connect(lambda: self.auto_resize_text_edit(self.txt_link))
+        self.auto_resize_text_edit(self.txt_link)
 
         self.btn_paste_link = QToolButton()
         self.btn_paste_link.setText("📋 Dán")
@@ -412,8 +414,10 @@ class MainWindowV2(QMainWindow):
         dir_box = QHBoxLayout()
         dir_box.setSpacing(6)
         self.txt_output_dir = QTextEdit("./downloads")
-        self.txt_output_dir.setFixedHeight(65)
-        self.txt_output_dir.setObjectName("MasterInput")
+        self.txt_output_dir.setObjectName("MasterTextEdit")
+        self.txt_output_dir.document().setDocumentMargin(0)
+        self.txt_output_dir.textChanged.connect(lambda: self.auto_resize_text_edit(self.txt_output_dir))
+        self.auto_resize_text_edit(self.txt_output_dir)
 
         self.btn_browse_dir = QToolButton()
         self.btn_browse_dir.setText("📂 Chọn")
@@ -422,16 +426,8 @@ class MainWindowV2(QMainWindow):
         self.btn_browse_dir.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_browse_dir.clicked.connect(self.browse_output_directory)
 
-        self.btn_open_dir = QToolButton()
-        self.btn_open_dir.setText("📁 Mở")
-        self.btn_open_dir.setObjectName("ToolBtn")
-        self.btn_open_dir.setMinimumWidth(60)
-        self.btn_open_dir.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_open_dir.clicked.connect(self.open_output_directory)
-
         dir_box.addWidget(self.txt_output_dir, stretch=1)
         dir_box.addWidget(self.btn_browse_dir)
-        dir_box.addWidget(self.btn_open_dir)
         col_out.addWidget(lbl_dir)
         col_out.addLayout(dir_box)
 
@@ -442,14 +438,16 @@ class MainWindowV2(QMainWindow):
         draft_box = QHBoxLayout()
         draft_box.setSpacing(6)
         self.txt_capcut_draft = QTextEdit()
-        self.txt_capcut_draft.setFixedHeight(65)
-        self.txt_capcut_draft.setObjectName("MasterInput")
+        self.txt_capcut_draft.setObjectName("MasterTextEdit")
+        self.txt_capcut_draft.document().setDocumentMargin(0)
         from src.utils import get_default_capcut_path
         default_cp_path = get_default_capcut_path()
         if default_cp_path:
             self.txt_capcut_draft.setText(default_cp_path)
         self.txt_capcut_draft.setPlaceholderText("Dán danh sách CapCut Draft (mỗi cái 1 dòng)...")
         self.txt_capcut_draft.textChanged.connect(self.sync_capcut_draft_to_worker)
+        self.txt_capcut_draft.textChanged.connect(lambda: self.auto_resize_text_edit(self.txt_capcut_draft))
+        self.auto_resize_text_edit(self.txt_capcut_draft)
 
         self.btn_browse_draft = QToolButton()
         self.btn_browse_draft.setText("📂Draft")
@@ -477,6 +475,15 @@ class MainWindowV2(QMainWindow):
 
         # Row Checkboxes (TRẠNG THÁI TẠO GIỌNG AI LUÔN LUÔN LÀ TRUE)
         check_row = QHBoxLayout()
+        
+        self.cbo_workflow_mode = QComboBox()
+        self.cbo_workflow_mode.setObjectName("WorkflowModeCombo")
+        self.cbo_workflow_mode.addItems(["🎥Tạo Video", "🎙️Tạo Audio"])
+        self.cbo_workflow_mode.setFixedHeight(28)
+        self.cbo_workflow_mode.setMinimumWidth(250)
+        self.cbo_workflow_mode.currentIndexChanged.connect(self.save_user_config)
+        self.cbo_workflow_mode.setStyleSheet("QComboBox { font-weight: bold; padding: 2px 10px; border-radius: 4px; border: 1px solid #3b82f6; background-color: #1e293b; color: #f8fafc; } QComboBox:hover { border: 1px solid #60a5fa; }")
+        
         self.chk_auto_inject_capcut = QCheckBox("💉 Tự động nhúng phụ đề vào CapCut PC Draft")
         self.chk_auto_inject_capcut.setChecked(True)
         self.chk_auto_inject_capcut.setObjectName("AccentCheck")
@@ -484,11 +491,11 @@ class MainWindowV2(QMainWindow):
         self.chk_auto_inject_capcut.stateChanged.connect(self.sync_auto_inject_to_worker)
 
         self.chk_enable_tts = QCheckBox("🎙️ Kích hoạt tạo giọng AI (TTS Engine)")
-        self.chk_enable_tts.setChecked(True)  # LUÔN MẶC ĐỊNH LÀ TRUE
+        self.chk_enable_tts.setChecked(True) 
         self.chk_enable_tts.setObjectName("PurpleCheck")
         self.chk_enable_tts.toggled.connect(self.save_user_config)
         
-        
+        check_row.addWidget(self.cbo_workflow_mode)
         check_row.addWidget(self.chk_auto_inject_capcut)
         check_row.addWidget(self.chk_enable_tts)
         check_row.addStretch()
@@ -903,6 +910,16 @@ class MainWindowV2(QMainWindow):
                 self.btn_login_bilibili.setText("🍪 Bilibili : Chưa Login")
                 self.btn_login_bilibili.setStyleSheet("background-color: #334155; color: #cbd5e1; font-size: 9.5pt; font-weight: 600; padding: 0 10px; border-radius: 5px; border: 1px solid #475569; min-height: 28px; max-height: 28px; height: 28px;")
 
+    def auto_resize_text_edit(self, text_edit: QTextEdit):
+        doc_height = int(text_edit.document().size().height())
+        margins = text_edit.contentsMargins()
+        # Tính sát với nội dung, cộng thêm viền (4px)
+        new_height = doc_height + margins.top() + margins.bottom() + 4
+        # Hạ mức min height xuống 35px để vừa khít 1 dòng
+        clamped_height = max(35, min(new_height, 400))
+        text_edit.setMinimumHeight(clamped_height)
+        text_edit.setMaximumHeight(clamped_height)
+
     def on_clean_ai_draft(self):
         draft_path = self.txt_capcut_draft.toPlainText().strip()
         if not draft_path:
@@ -955,10 +972,10 @@ class MainWindowV2(QMainWindow):
         last_profile = cfg.get("last_profile", "")
         last_gradio = cfg.get("last_gradio_url", "")
         last_ref_aud = cfg.get("last_ref_audio", "")
-        last_ref_txt = cfg.get("last_ref_text", "")
+        last_ref_text = cfg.get("last_ref_text", "")
         enable_tts = cfg.get("enable_tts", True)
         auto_inject_capcut = cfg.get("auto_inject_capcut", True)
-        autoscroll = cfg.get("autoscroll", True)
+        workflow_mode_idx = cfg.get("workflow_mode_idx", 0)
 
         if last_url: self.txt_link.setText(last_url)
         if last_dir: self.txt_output_dir.setText(last_dir)
@@ -970,13 +987,14 @@ class MainWindowV2(QMainWindow):
             self.txt_gradio_url.setText(last_gradio)
         if last_ref_aud and hasattr(self, 'txt_ref_audio'):
             self.txt_ref_audio.setText(last_ref_aud)
-        if last_ref_txt and hasattr(self, 'txt_ref_text'):
-            self.txt_ref_text.setText(last_ref_txt)
+        if last_ref_text and hasattr(self, 'txt_ref_text'):
+            self.txt_ref_text.setText(last_ref_text)
         if hasattr(self, 'chk_enable_tts'):
             self.chk_enable_tts.setChecked(enable_tts)
         if hasattr(self, 'chk_auto_inject_capcut'):
             self.chk_auto_inject_capcut.setChecked(auto_inject_capcut)
-        # autoscroll load removed
+        if hasattr(self, 'cbo_workflow_mode'):
+            self.cbo_workflow_mode.setCurrentIndex(workflow_mode_idx)
 
         self.append_log("⚙️ Đã nạp cấu hình đã lưu thành công.", "info")
 
@@ -992,7 +1010,7 @@ class MainWindowV2(QMainWindow):
             "last_ref_text": self.txt_ref_text.text().strip(),
             "enable_tts": self.chk_enable_tts.isChecked() if hasattr(self, 'chk_enable_tts') else True,
             "auto_inject_capcut": self.chk_auto_inject_capcut.isChecked() if hasattr(self, 'chk_auto_inject_capcut') else True,
-            # "autoscroll" removed
+            "workflow_mode_idx": self.cbo_workflow_mode.currentIndex() if hasattr(self, 'cbo_workflow_mode') else 0,
         }
         ConfigManager.save_config(cfg)
 
@@ -1073,11 +1091,6 @@ class MainWindowV2(QMainWindow):
         if dir_path:
             self.txt_output_dir.setText(dir_path)
             self.save_user_config()
-
-    def open_output_directory(self):
-        dir_path = os.path.abspath(self.txt_output_dir.toPlainText().strip() or "./downloads")
-        os.makedirs(dir_path, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(dir_path))
 
     def paste_link_only(self):
         clipboard = QApplication.clipboard()
@@ -1271,6 +1284,9 @@ class MainWindowV2(QMainWindow):
         self.start_timestamp = time.time()
         self.timer.start()
 
+        workflow_mode_idx = self.cbo_workflow_mode.currentIndex() if hasattr(self, 'cbo_workflow_mode') else 0
+        current_mode = "audio_only" if workflow_mode_idx == 1 else "video"
+
         self.worker = ProcessWorker(
             link=target_url,
             output_dir=out_dir,
@@ -1283,7 +1299,8 @@ class MainWindowV2(QMainWindow):
             gradio_url=gradio,
             ref_audio_path=ref_aud,
             ref_text=ref_txt,
-            fast_forward_mode=fast_forward
+            fast_forward_mode=fast_forward,
+            workflow_mode=current_mode
         )
         self.worker.log_signal.connect(self.append_log)
         self.worker.progress_signal.connect(self.update_local_progress)
@@ -1571,6 +1588,19 @@ class MainWindowV2(QMainWindow):
             height: 30px;
         }
         #MasterInput:focus {
+            border: 1.5px solid #38bdf8;
+            background-color: #030712;
+        }
+        
+        #MasterTextEdit {
+            background-color: #0b0f17;
+            color: #f8fafc;
+            border: 1px solid #334155;
+            border-radius: 5px;
+            padding: 6px 10px;  /* Tăng padding trên/dưới để đẩy chữ xuống căn giữa */
+            font-size: 9.5pt;
+        }
+        #MasterTextEdit:focus {
             border: 1.5px solid #38bdf8;
             background-color: #030712;
         }

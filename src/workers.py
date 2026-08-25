@@ -113,8 +113,9 @@ class ProcessWorker(QThread):
     request_gradio_link_signal = pyqtSignal() # Yêu cầu người dùng nhập link Gradio khi tới Bước 5
     badge_signal = pyqtSignal(str, str)       # Tín hiệu cập nhật UI System Badge (text, màu nền)
 
-    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = "", fast_forward_mode: bool = False):
+    def __init__(self, link: str, output_dir: str = "./downloads", auto_gen_srt: bool = False, auto_translate_srt: bool = False, local_media_path: str = None, srt_translate_path: str = None, qa_scan_path: str = None, qa_repair_mode: bool = False, profile_folder: str = "chrome_data_1", auto_inject_capcut: bool = False, capcut_draft_path: str = "", enable_tts: bool = True, gradio_url: str = "", ref_audio_path: str = "", ref_text: str = "", fast_forward_mode: bool = False, workflow_mode: str = "video"):
         super().__init__()
+        self.workflow_mode = workflow_mode
         self.fast_forward_mode = fast_forward_mode
         self.link = link
         self.output_dir = output_dir
@@ -396,6 +397,7 @@ class ProcessWorker(QThread):
     
                 # Vòng lặp Iterative Healing
                 max_qa_passes = 5
+                qa_scan_mode = 'semantic' if self.workflow_mode == "audio_only" else 'all'
                 for pass_idx in range(max_qa_passes):
                     self.emit_log(f"🔄 Đang chạy vòng lặp QA lần {pass_idx + 1}/{max_qa_passes}...")
                     
@@ -406,7 +408,7 @@ class ProcessWorker(QThread):
                         analyze_src = fixed_vi_folder
                     
                     if analyze_srt_to_file:
-                        analyze_srt_to_file(analyze_src, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
+                        analyze_srt_to_file(analyze_src, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), scan_mode=qa_scan_mode, check_pause_callback=self.check_pause)
         
                     report_files = [f for f in os.listdir(report_folder) if f.endswith('.txt') and not f.endswith('_da_sua.txt') and not f.endswith('_done.txt') and not f.endswith('.done') and ('report' in f.lower() or 'qa' in f.lower())]
         
@@ -436,7 +438,7 @@ class ProcessWorker(QThread):
                         )
         
                         if analyze_srt_to_file:
-                            re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), check_pause_callback=self.check_pause)
+                            re_err, re_crit, re_warn = analyze_srt_to_file(fixed_vi_folder, report_folder, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), scan_mode=qa_scan_mode, check_pause_callback=self.check_pause)
                             if re_crit == 0:
                                 self.emit_log(f"✅ RE-SCAN HOÀN HẢO: 0 Lỗi nghiêm trọng (Critical) sau khi sửa! (Còn {re_warn} cảnh báo nhỏ)", "success")
                                 break
