@@ -769,7 +769,7 @@ class MainWindowV2(QMainWindow):
         
     def load_queue_data(self):
         import json
-        queue_file = os.path.join("user_data", "queue.json")
+        queue_file = os.path.join("user_data", "config", "queue.json")
         if os.path.exists(queue_file):
             try:
                 with open(queue_file, "r", encoding="utf-8") as f:
@@ -791,7 +791,7 @@ class MainWindowV2(QMainWindow):
                 if pending_drafts:
                     self.txt_capcut_draft.setText('\n'.join(pending_drafts))
             except json.JSONDecodeError as e:
-                self.append_log(f"⚠️ File queue.json bị hỏng. Không thể khôi phục hàng đợi: {e}", "warning")
+                self.append_log(f"⚠️ File config/queue.json bị hỏng. Không thể khôi phục hàng đợi: {e}", "warning")
             except Exception as e:
                 self.append_log(f"❌ Lỗi không xác định khi tải hàng đợi: {e}", "error")
 
@@ -1186,7 +1186,7 @@ class MainWindowV2(QMainWindow):
                 "status": "pending"
             })
         
-        queue_file = os.path.join("user_data", "queue.json")
+        queue_file = os.path.join("user_data", "config", "queue.json")
         os.makedirs(os.path.dirname(queue_file), exist_ok=True)
         with open(queue_file, "w", encoding="utf-8") as f:
             json.dump(queue_data, f, indent=4, ensure_ascii=False)
@@ -1398,7 +1398,7 @@ class MainWindowV2(QMainWindow):
             if hasattr(self, 'job_queue') and self.current_job_index < len(self.job_queue):
                 self.job_queue[self.current_job_index]["status"] = "completed"
                 import json
-                queue_file = os.path.join("user_data", "queue.json")
+                queue_file = os.path.join("user_data", "config", "queue.json")
                 with open(queue_file, "w", encoding="utf-8") as f:
                     json.dump(self.job_queue, f, indent=4, ensure_ascii=False)
                     
