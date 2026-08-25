@@ -474,6 +474,8 @@ class ProcessWorker(QThread):
             # ── BƯỚC 6: CAPCUT DRAFT INJECT HOẶC SINH AUDIO ĐỘC LẬP ──
             if self.workflow_mode == "audio_only":
                 self.badge_signal.emit("🎵 ĐANG TẠO AUDIO", "#16a34a")
+            elif self.workflow_mode == "hybrid_video":
+                self.badge_signal.emit("🧪 ĐANG CHẠY HYBRID", "#16a34a")
             else:
                 self.badge_signal.emit("💉 ĐANG NHÚNG CAPCUT", "#16a34a")
             self.step_signal.emit(6)
@@ -490,7 +492,8 @@ class ProcessWorker(QThread):
                             "REF_AUDIO_PATH": self.ref_audio_path,
                             "REF_TEXT": self.ref_text,
                             "SPEED_RATIO": 1.0,
-                            "CREATE_NATURAL_AUDIO_ONLY": True
+                            "CREATE_NATURAL_AUDIO_ONLY": True,
+                            "EXPERIMENTAL_HYBRID_MODE": False
                         }
                         backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
                         backend.run_process()
@@ -515,12 +518,16 @@ class ProcessWorker(QThread):
                             "REF_AUDIO_PATH": self.ref_audio_path,
                             "REF_TEXT": self.ref_text,
                             "SPEED_RATIO": 1.25,
-                            "CREATE_NATURAL_AUDIO_ONLY": False
+                            "CREATE_NATURAL_AUDIO_ONLY": False,
+                            "EXPERIMENTAL_HYBRID_MODE": (self.workflow_mode == "hybrid_video")
                         }
                         backend = CapCutBackend(cfg, log_callback=lambda msg, lvl="info": self.emit_log(msg, lvl), progress_callback=lambda d, t, msg: self.emit_progress(int((d/t)*100) if t > 0 else 0, msg), check_pause_callback=self.check_pause)
                         backend.ensure_capcut_closed()
                         backend.run_process(only_inject=not self.enable_tts)
-                        self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")
+                        if self.workflow_mode == "hybrid_video":
+                            self.emit_log("🎉 ĐÃ HOÀN TẤT NHÚNG CAPCUT (CHẾ ĐỘ HYBRID THỬ NGHIỆM)!", "success")
+                        else:
+                            self.emit_log("🎉 ĐÃ NHÚNG PHỤ ĐỀ TRỰC TIẾP VÀO CAPCUT DRAFT THÀNH CÔNG!", "success")
                     except Exception as inject_e:
                         self.emit_log(f"⚠️ Thất bại khi nhúng vào CapCut: {inject_e}", "warning")
 

@@ -478,7 +478,7 @@ class MainWindowV2(QMainWindow):
         
         self.cbo_workflow_mode = QComboBox()
         self.cbo_workflow_mode.setObjectName("WorkflowModeCombo")
-        self.cbo_workflow_mode.addItems(["🎥Tạo Video", "🎙️Tạo Audio"])
+        self.cbo_workflow_mode.addItems(["🎥Tạo Video (Cũ)", "🎙️Tạo Audio", "🧪Tạo Video (Hybrid)"])
         self.cbo_workflow_mode.setFixedHeight(28)
         self.cbo_workflow_mode.setMinimumWidth(250)
         self.cbo_workflow_mode.currentIndexChanged.connect(self.save_user_config)
@@ -1285,7 +1285,12 @@ class MainWindowV2(QMainWindow):
         self.timer.start()
 
         workflow_mode_idx = self.cbo_workflow_mode.currentIndex() if hasattr(self, 'cbo_workflow_mode') else 0
-        current_mode = "audio_only" if workflow_mode_idx == 1 else "video"
+        if workflow_mode_idx == 1:
+            current_mode = "audio_only"
+        elif workflow_mode_idx == 2:
+            current_mode = "hybrid_video"
+        else:
+            current_mode = "video"
 
         self.worker = ProcessWorker(
             link=target_url,

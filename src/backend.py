@@ -175,14 +175,78 @@ class CapCutBackend:
             
         subs = pysrt.open(self.cfg['SRT_FILE_PATH'], encoding="utf-8")
         
-        self.log_fn("----------------")
-        self.log_fn("✂️ BƯỚC 1: Đọc từng dòng SRT riêng lẻ...")
         items_to_process = []
-        for sub in subs:
-            cleaned = self.clean_text(sub.text)
-            if cleaned:
-                items_to_process.append({"text": cleaned, "original_start_ms": sub.start.ordinal, "original_end_ms": sub.end.ordinal, "original_duration_ms": sub.end.ordinal - sub.start.ordinal})
-        self.log_fn(f"✅ Đã tải {len(items_to_process)} block SRT.")
+        if self.cfg.get('EXPERIMENTAL_HYBRID_MODE', False):
+            self.log_fn("----------------")
+            self.log_fn("🧪 BƯỚC 1 (HYBRID): Đang gom block SRT thành CÂU HOÀN CHỈNH...")
+            char_map = []
+            for sub in subs:
+                text = sub.text.replace('\n', ' ').strip()
+                text = re.sub(r'\s+', ' ', text)
+                if not text: continue
+                
+                start_ms = sub.start.ordinal
+                end_ms = sub.end.ordinal
+                duration = end_ms - start_ms
+                time_per_char = duration / len(text)
+                
+                if char_map and char_map[-1]['char'] != ' ' and text[0] != ' ':
+                    char_map.append({'char': ' ', 'time': start_ms})
+                    
+                for i, char in enumerate(text):
+                    char_map.append({'char': char, 'time': start_ms + int(i * time_per_char)})
+
+            full_text = "".join([c['char'] for c in char_map])
+            boundaries = [0]
+            for i in range(len(full_text) - 1):
+                if full_text[i] in ['.', '!', '?'] and full_text[i+1].isspace():
+                    if full_text[i] == '.' and i > 0 and full_text[i-1] == '.':
+                        continue
+                    if i + 2 < len(full_text) and full_text[i+1] == '"' and full_text[i+2].isspace():
+                        boundaries.append(i + 2)
+                    else:
+                        boundaries.append(i + 1)
+            boundaries.append(len(full_text))
+            
+            for k in range(len(boundaries) - 1):
+                start_idx = boundaries[k]
+                end_idx = boundaries[k+1] - 1
+                
+                sentence = full_text[start_idx:end_idx+1].strip()
+                if not sentence or not re.search(r'[a-zA-Z0-9À-ỹ]', sentence):
+                    continue
+                    
+                while start_idx < end_idx and char_map[start_idx]['char'].isspace():
+                    start_idx += 1
+                while end_idx > start_idx and char_map[end_idx]['char'].isspace():
+                    end_idx -= 1
+                    
+                start_ms = char_map[start_idx]['time']
+                end_ms = char_map[end_idx]['time']
+                
+                # Làm sạch text như cũ để đọc TTS tốt hơn
+                cleaned = self.clean_text(sentence)
+                if cleaned:
+                    items_to_process.append({
+                        "text": cleaned, 
+                        "original_start_ms": start_ms, 
+                        "original_end_ms": end_ms, 
+                        "original_duration_ms": end_ms - start_ms
+                    })
+            self.log_fn(f"✅ Đã gom thành công {len(items_to_process)} câu (từ {len(subs)} block SRT).")
+        else:
+            self.log_fn("----------------")
+            self.log_fn("✂️ BƯỚC 1: Đọc từng dòng SRT riêng lẻ (Mode Cũ)...")
+            for sub in subs:
+                cleaned = self.clean_text(sub.text)
+                if cleaned:
+                    items_to_process.append({
+                        "text": cleaned, 
+                        "original_start_ms": sub.start.ordinal, 
+                        "original_end_ms": sub.end.ordinal, 
+                        "original_duration_ms": sub.end.ordinal - sub.start.ordinal
+                    })
+            self.log_fn(f"✅ Đã tải {len(items_to_process)} block SRT.")
 
         total_items = len(items_to_process)
         if total_items == 0:
