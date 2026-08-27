@@ -1089,10 +1089,7 @@ def get_target_file(block_id, folder, prefix, block_map=None):
                     except Exception:
                         pass
 
-    file_no = ((block_id - 1) // 100) + 1
-    if prefix:
-        return os.path.join(folder, f"{prefix}_{file_no}.srt")
-    return os.path.join(folder, f"part_{file_no}.srt")
+    return None
 
 
 def replace_blocks_in_folder(folder, patch_text, log_callback=print):
@@ -1134,6 +1131,9 @@ def replace_blocks_in_folder(folder, patch_text, log_callback=print):
     file_to_ids = defaultdict(set)
     for b_id in all_ids:
         filepath = get_target_file(b_id, folder, prefix, block_map)
+        if filepath is None:
+            log_callback(f"   ⚠️ Bỏ qua block {b_id} vì không tồn tại trong thực tế")
+            continue
         file_to_ids[filepath].add(b_id)
 
     # Xử lý từng file (sắp xếp theo thứ tự số tự nhiên: part_1, part_2 ... part_32)

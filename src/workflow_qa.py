@@ -36,6 +36,7 @@ def run_auto_qa_repair(prompt_file, report_folder, original_srt_folder, fixed_sr
         if f.lower().endswith('.txt') 
         and not f.lower().endswith('_da_sua.txt') 
         and not f.lower().endswith('.done')
+        and not f.lower().endswith('_done.txt')
         and ('report' in f.lower() or 'qa' in f.lower())
     ]
     

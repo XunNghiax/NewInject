@@ -1437,6 +1437,7 @@ class MainWindowV2(QMainWindow):
             self.update_kpi_value("kpi_status", "THẤT BẠI ❌", "#ef4444")
             self.lbl_system_badge.setText("❌ LỖI")
             self.set_badge_style(self.lbl_system_badge, "#dc2626", "white")
+            self.stepper_widget.set_step(self.stepper_widget.current_step, "error")
             QMessageBox.warning(self, "Tiến Trình Thất Bại ⚠️", f"Đã xảy ra lỗi ở dự án {self.current_job_index+1}:\n{message}")
 
     def update_local_progress(self, pct: int, status: str):
