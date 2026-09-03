@@ -38,7 +38,9 @@ New/
 ├── gui_v2.py                # [View] Giao diện người dùng chính (PyQt6 v2). Khởi tạo luồng.
 ├── gui.py                   # Giao diện cũ (v1) - Dùng để tham khảo.
 ├── README.md                # Tài liệu hướng dẫn sử dụng dự án.
-├── ARCHITECTURE.md          # Tài liệu chi tiết về kỹ thuật và luồng hệ thống.
+├── doc/                     # Thư mục chứa tài liệu kỹ thuật
+│   ├── ARCHITECTURE.md      # Tài liệu chi tiết về kiến trúc và luồng hệ thống.
+│   └── MEMORY.MD            # Bản đồ Trí nhớ Kỹ thuật (Developer & AI).
 └── src/                     # [Core/Model] Thư mục mã nguồn xử lý logic (Backend)
     ├── gemini_bot.py        # Trí não AI trung tâm, điều khiển Playwright tương tác Google Gemini.
     ├── srt_manager.py       # "Tổng quản lý" phụ đề. Cắt/gộp, quét lỗi, vá lỗi, dãn tốc độ thời gian.
@@ -102,6 +104,14 @@ flowchart LR
 * **Lỗi `Permission Denied` khi nhúng phụ đề:** CapCut đang mở file dự án. Đóng hoàn toàn CapCut trước khi nhúng.
 * **Mất kết nối Gradio TTS:** Nếu báo lỗi Server, tiến trình sẽ báo Tạm dừng. Bạn chỉ cần chạy lại URL Gradio mới trên Colab, dán vào UI, và hệ thống sẽ tự động Resume.
 * **Gemini Playwright không chạy:** Xóa thư mục `user_data/chrome_profiles` để ép hệ thống tạo phiên đăng nhập (Profile) mới từ đầu.
+
+---
+
+## 📚 Tài liệu Kỹ thuật (Technical Documentation)
+
+Để hiểu rõ hơn về kiến trúc hệ thống và luồng xử lý sâu bên trong, vui lòng tham khảo các tài liệu trong thư mục `doc/`:
+* [**ARCHITECTURE.md**](doc/ARCHITECTURE.md): Tổng quan kiến trúc, luồng xử lý kỹ thuật đa luồng và tương tác CapCut.
+* [**MEMORY.MD**](doc/MEMORY.MD): Bản đồ trí nhớ cho Developer, giải thích chi tiết các module cốt lõi (Core Modules) và những cạm bẫy kỹ thuật (Pitfalls).
 
 ---
 
