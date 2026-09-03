@@ -2,8 +2,8 @@ import sys
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from PyQt6.QtCore import Qt
 
-# Nhập khẩu giao diện từ gui.py cũ (đảm bảo file gui.py phải nằm cùng thư mục)
-from ui.gui import CapCutInjectorGUI
+# Nhập khẩu giao diện từ legacy_app.py cũ (trước đây là gui.py)
+from ui.legacy_app import CapCutInjectorGUI
 
 class AdvancedToolsPanel(QWidget):
     """

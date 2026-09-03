@@ -12,7 +12,10 @@ Dự án là một hệ thống tự động hóa toàn diện (automation pipel
 ## 2. Cấu trúc thư mục mới (Refactored Directory Structure - MVC & OOP)
 Kiến trúc dự án đã được Tái cấu trúc triệt để (Refactored) phân tách rõ ràng theo mô hình MVC (Model-View-Controller) và Hướng đối tượng (OOP):
 
-- `gui_v2.py`: **[View/Controller]** File giao diện người dùng chính. Chỉ đảm nhiệm vẽ UI (PyQt6), tiếp nhận sự kiện click và cấu hình luồng chạy. Hoàn toàn không chứa logic xử lý backend.
+- `ui/`: Thư mục chứa toàn bộ giao diện người dùng (View/Controller)
+  - `main_window.py`: **[View/Controller]** Giao diện chính (PyQt6). Đảm nhiệm vẽ UI, tiếp nhận sự kiện click và cấu hình luồng chạy. Hoàn toàn không chứa logic xử lý backend.
+  - `advanced_panel.py`: **[View/Widget]** Component đóng gói các công cụ nâng cao, dùng để nhúng ứng dụng cũ vào giao diện mới.
+  - `legacy_app.py`: **[Legacy]** Bản lưu trữ của ứng dụng V1, gánh logic cho tab Advanced Tools.
 - `src/`: Thư mục chứa toàn bộ logic cốt lõi (Core Business Logic)
   - `gemini_bot.py`: **[Core/Model]** Class `GeminiBot`. Trí não AI trung tâm, đóng gói 100% các thao tác Playwright (mở trình duyệt, quản lý Profile, bypass Flash-Lite, upload file, giám sát phản hồi). Nếu Google cập nhật UI, chỉ cần sửa duy nhất file này.
   - `srt_manager.py`: **[Core/Model]** "Tổng quản lý" phụ đề. Đóng gói toàn bộ các thuật toán xử lý text (cắt nhỏ/gộp SRT, dãn tốc độ thời gian, quét và phân tích lỗi QA, đắp bản vá LLM).
@@ -33,7 +36,7 @@ Kiến trúc dự án đã được Tái cấu trúc triệt để (Refactored) 
 ## 3. Kiến trúc State Management & Quy ước Code (Conventions)
 ### 3.1. Kiến trúc Đa luồng (Multi-threading) & UI
 - **Framework**: **PyQt6**.
-- **Tách biệt UI và Backend**: Mọi công việc nặng (tải file, dịch AI, xử lý JSON) BẮT BUỘC phải được ném vào các Worker Threads trong `src/workers.py`. UI (`gui_v2.py`) tuyệt đối không xử lý vòng lặp nặng.
+- **Tách biệt UI và Backend**: Mọi công việc nặng (tải file, dịch AI, xử lý JSON) BẮT BUỘC phải được ném vào các Worker Threads trong `src/workers.py`. UI (`ui/main_window.py`) tuyệt đối không xử lý vòng lặp nặng.
 - **Giao tiếp (Communication)**: Các luồng nền giao tiếp với UI thông qua cơ chế **Signals/Slots** (`pyqtSignal`).
 - **Cơ chế Pause/Stop an toàn (Interrupts)**: Toàn bộ quá trình chạy được kiểm soát bởi `QWaitCondition` và `QMutex`. Cờ `check_pause_callback` được truyền xuyên suốt qua tất cả các module (từ Bilibili Downloader, Whisper, Playwright tới ThreadPool của Gradio TTS). Khi người dùng nhấn Pause/Stop, luồng nền sẽ phản hồi và dừng ngay lập tức mà không gây crash hoặc deadlock.
 - **Auto Profile Rotation**: Hệ thống có khả năng theo dõi ngạch tài khoản Google (Quota). Nếu phát hiện account bị ép dùng bản Flash-Lite, hệ thống tự đánh dấu Cooldown (Khóa 5h) và tự động nhảy qua Account Pro khác để làm tiếp.
@@ -109,3 +112,38 @@ Hệ thống vận hành theo một dây chuyền (Pipeline) nghiêm ngặt, đ�
     - `local_material_id`: Bắt buộc phải là một mã định danh ngẫu nhiên chuẩn UUID (sinh qua `uuid.uuid4()`). Nếu để trống chuỗi `""`, toàn bộ media đó sẽ bị CapCut vứt bỏ và biến mất khỏi timeline.
   - **5. Kiểm soát độ chính xác (Precision & Linking):** Thông số như tốc độ (`speed_ratio`) được bo tròn chuẩn 4 chữ số thập phân (`round(val, 4)`) để tránh CapCut C++ JSON Parser bị Crash/Ngắt số khi số thập phân quá dài. Khớp nối các mảng `segments` trên Track với UUID của `audio` và các tài nguyên đi kèm như `speeds`.
   - **Ghi đè file:** Kết thúc luồng, hệ thống chép ngược cấu trúc Data object vào lại file `.json`. Người dùng mở lại dự án trên phần mềm CapCut PC sẽ thấy mọi file wav tự động dải đều đặn và khớp timecode 100% lên dòng thời gian.
+
+### 5.1. Cấu trúc Payload JSON (Reference Draft Content)
+Để tích hợp thành công vào CapCut, hệ thống phải bơm chính xác 3 khối dữ liệu (Schema) sau:
+
+**1. Khối khai báo Media (`materials.audios`):**
+```json
+{
+    "id": "UUID_AUDIO_UPPERCASE", 
+    "unique_id": "MD5_HASH_OF_FILE", 
+    "type": "extract_music", 
+    "name": "clip_001.wav", 
+    "duration": 1500000, 
+    "path": "C:/Absolute/Path/To/clip_001.wav", 
+    "category_name": "local", 
+    "check_flag": 1, 
+    "local_material_id": "uuid_lowercase"
+}
+```
+
+**2. Khối khai báo tham chiếu Vật liệu phụ (Extra Materials Refs):**
+Cần sinh UUID rác cho 5 mảng: `speeds`, `placeholder_infos`, `beats`, `sound_channel_mappings`, `vocal_separations`.
+
+**3. Khối định tuyến Timeline (`tracks.segments`):**
+```json
+{
+    "id": "UUID_SEGMENT", 
+    "material_id": "UUID_AUDIO_UPPERCASE", 
+    "extra_material_refs": ["UUID_SPEED", "UUID_PLACEHOLDER", "..."],
+    "source_timerange": {"start": 0, "duration": 1500000}, 
+    "target_timerange": {"start": 500000, "duration": 1500000},
+    "speed": 1.0, 
+    "track_render_index": 1, 
+    "visible": true
+}
+```

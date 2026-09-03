@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QFileDialog, QTabWidget, QScrollArea,
     QSizePolicy, QStackedWidget
 )
-from ui.gui_advanced import AdvancedToolsPanel
+from ui.advanced_panel import AdvancedToolsPanel
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QMutex, QWaitCondition, QTimer, QUrl, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QTextCursor, QKeySequence, QShortcut, QDesktopServices
 

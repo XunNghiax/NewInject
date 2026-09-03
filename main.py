@@ -4,7 +4,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt6.QtWidgets import QApplication
-from ui.gui_v2 import MainWindowV2
+from ui.main_window import MainWindowV2
 
 def main():
     app = QApplication(sys.argv)
